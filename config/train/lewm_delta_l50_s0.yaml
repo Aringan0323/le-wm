@@ -1,0 +1,7 @@
+defaults:
+  - lewm_delta_l50_s09
+  - _self_
+
+loss:
+  sigreg:
+    weight: 0.0

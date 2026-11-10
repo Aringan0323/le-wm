@@ -85,6 +85,7 @@ def initialization_record(model, cfg, bundle, run_dir):
     if path.exists():
         raise FileExistsError(f"Initialization evidence already exists: {path}")
     state = model.state_dict()
+    excluded = ("action_predictor.", "ldad.") if getattr(model, "ldad", None) is not None else ("action_predictor.",)
     record = {
         "schema_version": 1, "created_utc": _utc_now(),
         "seed": int(_config_value(cfg, "seed", 3072)),
@@ -95,10 +96,10 @@ def initialization_record(model, cfg, bundle, run_dir):
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "trainable_parameter_count": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
         "state_sha256": state_dict_sha256(state),
-        "shared_state_sha256": state_dict_sha256(state, exclude_prefixes=("action_predictor.",)),
-        "shared_state_excluded_prefixes": ["action_predictor."],
+        "shared_state_sha256": state_dict_sha256(state, exclude_prefixes=excluded),
+        "shared_state_excluded_prefixes": list(excluded),
         "state_entry_count": len(state),
-        "shared_state_entry_count": sum(not name.startswith("action_predictor.") for name in state),
+        "shared_state_entry_count": sum(not name.startswith(excluded) for name in state),
         "hash_format": "sorted state names; length-prefixed canonical name/dtype/shape JSON and contiguous raw tensor bytes; lengths uint64 little-endian",
     }
     _write_json(path, record)

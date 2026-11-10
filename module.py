@@ -86,9 +86,9 @@ class Attention(nn.Module):
 
 
 class ConditionalBlock(nn.Module):
-    """Transformer block with AdaLN-zero conditioning"""
+    """AdaLN-conditioned Transformer block, zero-initialized by default."""
 
-    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0):
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, zero_init=True):
         super().__init__()
 
         self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)
@@ -99,14 +99,15 @@ class ConditionalBlock(nn.Module):
             nn.SiLU(), nn.Linear(dim, 6 * dim, bias=True)
         )
 
-        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+        if zero_init:
+            nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
 
-    def forward(self, x, c):
+    def forward(self, x, c, *, causal=True):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=-1)
         )
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), causal=causal)
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -283,6 +284,36 @@ class ARPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x, c)
         return x
+
+
+class LatentDifferenceActionDecoder(nn.Module):
+    """Decode an independent sequence of executed actions from each observed displacement."""
+
+    def __init__(self, dim, action_dim, horizon=5, depth=3, heads=8, dim_head=64, mlp_dim=512):
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.queries = nn.Parameter(torch.randn(1, horizon, dim))
+        # Standard initialization lets reconstruction gradients reach both
+        # observed endpoints at the first update. The dynamics predictor
+        # retains its original AdaLN-zero initialization.
+        self.layers = nn.ModuleList([
+            ConditionalBlock(dim, heads, dim_head, mlp_dim, zero_init=False)
+            for _ in range(depth)
+        ])
+        self.norm = nn.LayerNorm(dim)
+        self.readout = nn.Linear(dim, action_dim)
+
+    def forward(self, displacement):
+        """[batch, intervals, latent] -> [batch, intervals, horizon, action]."""
+        batch, intervals, dim = displacement.shape
+        condition = displacement.reshape(batch * intervals, 1, dim)
+        tokens = self.queries.expand(batch * intervals, -1, -1)
+        for layer in self.layers:
+            # The same displacement modulates all queries in this interval.
+            tokens = layer(tokens, condition, causal=False)
+        actions = self.readout(self.norm(tokens))
+        return actions.reshape(batch, intervals, self.horizon, self.action_dim)
 
 
 class ActionPredictor(nn.Module):

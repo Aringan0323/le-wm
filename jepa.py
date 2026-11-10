@@ -18,6 +18,7 @@ class JEPA(nn.Module):
         projector=None,
         pred_proj=None,
         action_predictor=None,
+        ldad=None,
     ):
         super().__init__()
 
@@ -27,6 +28,7 @@ class JEPA(nn.Module):
         self.projector = projector or nn.Identity()
         self.pred_proj = pred_proj or nn.Identity()
         self.action_predictor = action_predictor
+        self.ldad = ldad
 
     def encode(self, info):
         """Encode observations and actions into embeddings.

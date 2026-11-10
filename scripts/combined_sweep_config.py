@@ -1,8 +1,8 @@
 """Identifiers and coefficients for the matched action-prediction runs."""
 from dataclasses import dataclass
-from pathlib import Path
+from experiment_paths import ROOT
 
-EXPERIMENTS = Path("/home/adam/lewm/experiments")
+EXPERIMENTS = ROOT / "experiments"
 REFERENCE = EXPERIMENTS / "episode50-30-20261106-03"
 COMBINED = EXPERIMENTS / "episode50-combined-20261107-01"
 MSE_ONLY = EXPERIMENTS / "episode50-mse-20261107-01"

@@ -85,39 +85,112 @@ def make_fixed_order(train_indices, seed=3072):
     return indices[permutation].copy()
 
 
+class EpochOrder:
+    """A deterministic schedule requiring only two cached epoch permutations (for prefetch)."""
+    def __init__(self, indices, seed, epochs):
+        from collections import OrderedDict
+        self.indices = _indices(indices).copy()
+        self.indices.flags.writeable = False
+        self.seed, self.epochs = int(seed), int(epochs)
+        self.windows_per_epoch = len(self.indices)
+        if not self.windows_per_epoch or self.epochs < 1 or len(np.unique(self.indices)) != self.windows_per_epoch:
+            raise ValueError("Each epoch must contain a nonempty set of distinct windows")
+        self._cache = OrderedDict()
+        digest = hashlib.sha256()
+        epoch_hashes = []
+        for epoch in range(self.epochs):
+            order = make_fixed_order(self.indices, self.seed + epoch)
+            digest.update(order)
+            epoch_hashes.append(hashlib.sha256(order).hexdigest())
+        self.order_hash = digest.hexdigest()
+        self.protocol = {"algorithm": "torch_base_seed_draw_randperm_seed_plus_epoch_v1", "seed": self.seed,
+                         "epochs": self.epochs, "windows_per_epoch": self.windows_per_epoch,
+                         "train_indices_sha256": order_sha256(self.indices), "epoch_sha256": epoch_hashes}
+
+    def __len__(self):
+        return self.windows_per_epoch * self.epochs
+
+    def epoch(self, epoch):
+        if epoch not in self._cache:
+            indices = make_fixed_order(self.indices, self.seed + epoch)
+            indices.flags.writeable = False
+            self._cache[epoch] = indices
+            if len(self._cache) > 2:
+                self._cache.popitem(last=False)
+        self._cache.move_to_end(epoch)
+        return self._cache[epoch]
+
+    def __getitem__(self, key):
+        start, stop, stride = key.indices(len(self))
+        if stride != 1:
+            raise ValueError("A training schedule supports only contiguous slices")
+        parts = []
+        while start < stop:
+            epoch, offset = divmod(start, self.windows_per_epoch)
+            amount = min(stop - start, self.windows_per_epoch - offset)
+            parts.append(self.epoch(epoch)[offset:offset + amount])
+            start += amount
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts) if parts else np.empty(0, dtype="<i8")
+
+
 class FixedOrderBatchSampler(torch.utils.data.Sampler):
     def __init__(self, order, batch_size, cursor=0):
-        self.order = _indices(order).copy()
-        if len(np.unique(self.order)) != len(self.order):
-            raise ValueError("A one-pass training order cannot repeat windows")
-        self.order.flags.writeable = False
+        if isinstance(order, EpochOrder):
+            self.order = order
+            self.windows_per_epoch = order.windows_per_epoch
+            self.epochs = order.epochs
+        else:
+            self.order = _indices(order).copy()
+            if len(np.unique(self.order)) != len(self.order):
+                raise ValueError("A one-pass training order cannot repeat windows")
+            self.order.flags.writeable = False
+            self.windows_per_epoch, self.epochs = len(self.order), 1
         self.batch_size = int(batch_size)
-        if self.batch_size < 1:
-            raise ValueError("Batch size must be positive")
+        if self.batch_size < 1 or not self.windows_per_epoch:
+            raise ValueError("Batch size and the number of windows must be positive")
+        self.steps_per_epoch = math.ceil(self.windows_per_epoch / self.batch_size)
+        self.total_steps = self.steps_per_epoch * self.epochs
         self.restore_cursor(cursor)
 
     def restore_cursor(self, cursor):
         cursor = int(cursor)
-        if cursor < 0 or cursor > len(self.order) or (cursor != len(self.order) and cursor % self.batch_size):
-            raise ValueError("Checkpoint cursor is not a valid committed batch boundary")
+        if cursor < 0 or cursor > len(self.order) or (cursor % self.windows_per_epoch) % self.batch_size:
+            raise ValueError("Checkpoint cursor is not a valid epoch-local batch boundary")
         self.cursor = cursor
 
     @property
     def global_step(self):
-        return math.ceil(self.cursor / self.batch_size)
+        epoch, offset = divmod(self.cursor, self.windows_per_epoch)
+        return epoch * self.steps_per_epoch + math.ceil(offset / self.batch_size)
+
+    @property
+    def last_batch_size(self):
+        if not self.cursor:
+            return 0
+        within = self.cursor % self.windows_per_epoch or self.windows_per_epoch
+        return within % self.batch_size or self.batch_size
 
     def __len__(self):
-        return math.ceil((len(self.order) - self.cursor) / self.batch_size)
+        return self.total_steps - self.global_step
+
+    def batch_end(self, start):
+        next_epoch = (start // self.windows_per_epoch + 1) * self.windows_per_epoch
+        return min(start + self.batch_size, next_epoch)
 
     def __iter__(self):
-        # This local cursor may run ahead due to prefetch. It is never committed.
-        for start in range(self.cursor, len(self.order), self.batch_size):
-            yield self.order[start:start + self.batch_size].tolist()
+        # Each epoch retains its partial last batch; prefetch never commits the cursor.
+        start = self.cursor
+        while start < len(self.order):
+            end = self.batch_end(start)
+            yield self.order[start:end].tolist()
+            start = end
 
     def commit(self, indices):
         indices = _indices(indices)
-        expected = self.order[self.cursor:self.cursor + self.batch_size]
-        if len(indices) == 0 or not np.array_equal(indices, expected):
+        expected = self.order[self.cursor:self.batch_end(self.cursor)]
+        if not len(indices) or not np.array_equal(indices, expected):
             raise ValueError("Completed batch does not match the next committed window IDs")
         self.cursor += len(indices)
 
@@ -174,32 +247,38 @@ class DurableTrainingTrace:
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.run_dir / "training-indices.i64"
-        self.order = _indices(order)
+        self.order = order if isinstance(order, EpochOrder) else _indices(order)
         self.cursor = int(resume["cursor"]) if resume else 0
-        expected = self.order[:self.cursor].tobytes()
+        self.digest = hashlib.sha256()
         if resume is None:
             self.stream = self.path.open("xb")
         else:
-            if not self.path.exists() or self.path.stat().st_size < len(expected):
+            length = self.cursor * 8
+            if not self.path.exists() or self.path.stat().st_size < length:
                 raise ValueError("Training trace is missing committed checkpoint samples")
             with self.path.open("rb") as source:
-                prefix = source.read(len(expected))
-                tail = source.read()
-            if prefix != expected or hashlib.sha256(prefix).hexdigest() != resume["trace_sha256"]:
-                raise ValueError("Training trace prefix does not match the checkpoint")
+                for start in range(0, self.cursor, 65536):
+                    expected = self.order[start:min(self.cursor, start + 65536)]
+                    raw = source.read(expected.nbytes)
+                    if raw != expected.tobytes():
+                        raise ValueError("Training trace prefix does not match the checkpoint")
+                    self.digest.update(raw)
+                if self.digest.hexdigest() != resume["trace_sha256"]:
+                    raise ValueError("Training trace checksum differs from the checkpoint")
+                tail = self.path.stat().st_size - length
+                if tail:
+                    backup = self.run_dir / f"training-indices.abandoned-{uuid.uuid4().hex}.i64"
+                    with backup.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
             if tail:
-                backup = self.run_dir / f"training-indices.abandoned-{uuid.uuid4().hex}.i64"
-                with backup.open("xb") as output:
-                    output.write(tail)
-                    output.flush()
-                    os.fsync(output.fileno())
                 with self.path.open("r+b") as output:
-                    output.truncate(len(expected))
+                    output.truncate(length)
                     output.flush()
                     os.fsync(output.fileno())
                 _fsync_directory(self.run_dir)
             self.stream = self.path.open("ab")
-        self.digest = hashlib.sha256(expected)
 
     def append(self, indices):
         indices = _indices(indices)
@@ -243,8 +322,9 @@ class CheckpointManager:
         self.manifest_sha256 = str(manifest_sha256)
         self.config_sha256 = str(config_sha256)
         self.batch_size = int(batch_size)
-        self.order = _indices(order).copy()
-        self.order_hash = order_sha256(self.order)
+        self.multi_epoch = isinstance(order, EpochOrder)
+        self.order = order if self.multi_epoch else _indices(order).copy()
+        self.order_hash = order.order_hash if self.multi_epoch else order_sha256(self.order)
         self.interval_seconds = float(interval_seconds)
         if self.interval_seconds <= 0:
             raise ValueError("Checkpoint interval must be positive")
@@ -270,7 +350,8 @@ class CheckpointManager:
              status="running", extra=None, final=False):
         if sampler.cursor != trace.cursor:
             raise ValueError("Cannot checkpoint inconsistent model/sample trace cursors")
-        if sampler.batch_size != self.batch_size or not np.array_equal(sampler.order, self.order):
+        same_order = sampler.order is self.order if self.multi_epoch else np.array_equal(sampler.order, self.order)
+        if sampler.batch_size != self.batch_size or not same_order:
             raise ValueError("Sampler differs from immutable checkpoint order/batch size")
         if torch.cuda.is_initialized():
             torch.cuda.synchronize()
@@ -281,18 +362,22 @@ class CheckpointManager:
         if sigreg is not None:
             state.update({f"sigreg.{key}": value for key, value in sigreg.state_dict().items()})
         metadata = {
-            "version": 1, "backend": "native_pytorch", "generation_id": generation_id,
+            "version": 2 if self.multi_epoch else 1, "backend": "native_pytorch", "generation_id": generation_id,
             "status": status, "saved_utc": saved_utc,
             "manifest_sha256": self.manifest_sha256, "config_sha256": self.config_sha256,
             "batch_size": self.batch_size, "cursor": sampler.cursor,
-            "total_windows": len(self.order), "expected_steps": math.ceil(len(self.order) / self.batch_size),
-            "order": torch.from_numpy(self.order.copy()), "order_sha256": self.order_hash,
+            "total_windows": len(self.order), "expected_steps": sampler.total_steps,
+            "order_sha256": self.order_hash,
             "trace_sha256": trace.digest.hexdigest(), "trace_bytes": trace.cursor * 8,
             "rng": capture_rng_state(), "extra": extra or {},
         }
+        if self.multi_epoch:
+            metadata["order_protocol"] = self.order.protocol
+        else:
+            metadata["order"] = torch.from_numpy(self.order.copy())
         payload = {"state_dict": state, "optimizer_states": [optimizer.state_dict()],
                    "lr_schedulers": [scheduler.state_dict()],
-                   "global_step": sampler.global_step, "epoch": 0,
+                   "global_step": sampler.global_step, "epoch": max(0, sampler.cursor - 1) // sampler.windows_per_epoch,
                    "resumable": metadata}
         generation = self.directory / f"{generation_id}.ckpt"
         temporary = self.directory / f".{generation_id}.tmp"
@@ -311,11 +396,24 @@ class CheckpointManager:
             selected = self._promote(generation, "final.ckpt") if final else self.directory / "last.ckpt"
         finally:
             temporary.unlink(missing_ok=True)
+        previous_generation = (self.latest_record or {}).get("generation_id")
         self.latest_record = {"path": str(selected), "global_step": sampler.global_step,
                               "windows_seen": sampler.cursor, "saved_utc": saved_utc,
                               "size_bytes": generation.stat().st_size, "sha256": checksum,
                               "status": status, "generation_id": generation_id}
         atomic_json(self.run_dir / "checkpoint.json", self.latest_record)
+        if self.multi_epoch:
+            # Publish and fsync the new aliases/record before pruning exact known
+            # generations. Preserve the initial state and the previous durable save.
+            initial = sorted(self.directory.glob("step-00000000-*.ckpt"), key=lambda p: p.stat().st_mtime_ns)
+            keep = {generation_id, previous_generation, initial[0].stem if initial else None}
+            for candidate in self.directory.glob("step-*.ckpt"):
+                if candidate.stem in keep:
+                    continue
+                sidecar = candidate.with_suffix(".json")
+                if sidecar.is_file() and json.loads(sidecar.read_text()).get("generation_id") == candidate.stem:
+                    candidate.unlink()
+            _fsync_directory(self.directory)
         self.last_saved_at = self.clock()
         return selected
 
@@ -326,7 +424,7 @@ class CheckpointManager:
             raise ValueError("Resume checkpoint must belong to this run's checkpoint directory")
         payload = torch.load(path, map_location="cpu", weights_only=False)
         metadata = payload.get("resumable", {})
-        if metadata.get("version") != 1 or metadata.get("backend") != "native_pytorch":
+        if metadata.get("version") != (2 if self.multi_epoch else 1) or metadata.get("backend") != "native_pytorch":
             raise ValueError("Checkpoint does not contain the native resumable cursor protocol")
         generation_id = metadata["generation_id"]
         if Path(generation_id).name != generation_id:
@@ -341,12 +439,16 @@ class CheckpointManager:
                               ("total_windows", len(self.order))):
             if metadata.get(key) != expected:
                 raise ValueError(f"Resume experiment mismatch: {key}")
-        if not np.array_equal(_indices(metadata["order"]), self.order):
+        if self.multi_epoch:
+            if metadata.get("order_protocol") != self.order.protocol:
+                raise ValueError("Checkpoint epoch schedule differs from the experiment")
+        elif not np.array_equal(_indices(metadata["order"]), self.order):
             raise ValueError("Checkpoint order differs from the experiment")
         if sampler is None:
             sampler = FixedOrderBatchSampler(self.order, self.batch_size)
         sampler.restore_cursor(metadata["cursor"])
-        if payload["global_step"] != sampler.global_step or metadata["trace_bytes"] != sampler.cursor * 8:
+        if (payload["global_step"] != sampler.global_step or metadata["trace_bytes"] != sampler.cursor * 8
+                or metadata["expected_steps"] != sampler.total_steps):
             raise ValueError("Checkpoint step/cursor/trace sizes disagree")
         model.load_state_dict({key[6:]: value for key, value in payload["state_dict"].items()
                                if key.startswith("model.")}, strict=True)

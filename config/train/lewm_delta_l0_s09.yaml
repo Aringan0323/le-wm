@@ -1,0 +1,17 @@
+defaults:
+  - lewm
+  - override data: tworoom
+  - override model: lewm_delta
+  - _self_
+
+trainer:
+  max_epochs: 50
+
+loss:
+  type: delta_jepa
+  ldad:
+    weight: 0.0
+  sigreg:
+    weight: 0.09
+
+track_cross_example_latent_spread: true

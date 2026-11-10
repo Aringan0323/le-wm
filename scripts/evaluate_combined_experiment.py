@@ -102,9 +102,10 @@ def add_candidate_reference(data, experiment, label):
     check(plan["model"] == label and saved["fingerprint"] == json_hash(plan) == result["plan_fingerprint"],
           f"{label} reference identity differs")
     protocol_fields = ("test_clip_order_sha256", "normalization", "batch_size", "metric_protocol")
+    reference_key = "protocol_spec_sha256" if "protocol_spec_sha256" in evidence else "results_sha256"
     check(all(plan[key] == previous_plan[key] for key in protocol_fields)
           and plan["manifest_canonical_sha256"] == manifest["manifest_sha256"]
-          and result["reference"]["results_sha256"] == evidence["results_sha256"]
+          and result["reference"][reference_key] == evidence[reference_key]
           and result["protocol"] == previous_plan["protocol"], f"{label} reference scoring protocol differs")
     summaries = {}
     for precision in PRECISIONS:
@@ -184,7 +185,7 @@ def publish_report(experiment, result):
 
 
 def score_candidate(experiment, model_name, label, objective, reference_data, *,
-                    phase_runner=evaluate_phase, entrypoint=None):
+                    phase_runner=evaluate_phase, entrypoint=None, checkpoint_reader=checkpoint_info):
     """Run the existing two precision phases for one audited candidate model."""
     import torch
     import stable_pretraining as spt
@@ -212,7 +213,7 @@ def score_candidate(experiment, model_name, label, objective, reference_data, *,
     check(file_hash(REPO / "scripts" / "evaluate_episode_experiment.py") == prior_plan["evaluator_source_sha256"],
           "Reference and candidate scoring implementations differ")
     storage = Path(os.environ["STABLEWM_HOME"])
-    checkpoint = checkpoint_info(storage, model_name, manifest_path, manifest["manifest_sha256"], objective)
+    checkpoint = checkpoint_reader(storage, model_name, manifest_path, manifest["manifest_sha256"], objective)
     check(checkpoint["files"]["weights"]["sha256"] == final_audit["audit"]["export"]["weights_file_sha256"],
           "Export no longer matches the audited model")
     torch.set_num_threads(prior_plan["cpu_threads"])
@@ -275,7 +276,8 @@ def score_candidate(experiment, model_name, label, objective, reference_data, *,
             print(f"{now()} Reusing completed phase after checksum verification: {precision}", flush=True)
         else:
             if model is None:
-                model = swm.wm.utils.load_pretrained(f"{model_name}/weights_epoch_1.pt")
+                weights_name = Path(checkpoint["files"]["weights"]["path"]).name
+                model = swm.wm.utils.load_pretrained(f"{model_name}/{weights_name}")
                 model.eval().requires_grad_(False)
                 check(all(not module.training for module in model.modules()), "Model is in training mode")
                 check(state_dict_sha256(model.state_dict()) == final_audit["audit"]["export"]["state_sha256"],

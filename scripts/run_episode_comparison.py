@@ -12,10 +12,10 @@ import subprocess
 import sys
 import time
 
-ROOT = Path('/home/adam/lewm')
+from experiment_paths import ROOT, REPORTS
 REPO = ROOT / 'le-wm'
 EXPERIMENT = ROOT / 'experiments/episode50-30-20261106-03'
-HOST_OUTPUT = Path('/mnt/c/Users/Adam/Desktop/AI/lewm-wsl/experiments/episode50-30-20261106-03')
+HOST_OUTPUT = REPORTS / EXPERIMENT.name
 MODELS = [('sigreg', 'lewm', 'tworoom-sigreg-episode50-20261106-03'),
           ('action_predictor', 'lewm_action', 'tworoom-action-episode50-20261106-03')]
 
@@ -40,10 +40,11 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def train_command(label, config, name, experiment=EXPERIMENT):
+def train_command(label, config, name, experiment=EXPERIMENT, epochs=1, dataset=None):
+    dataset = dataset or ROOT / 'storage-local/datasets/tworoom.h5'
     return [sys.executable, '-u', str(experiment / 'source/train_resumable.py'), '--config-name', config,
-            'data=tworoom', 'data.dataset.name=/home/adam/lewm/storage-local/datasets/tworoom.h5', f'subdir={name}', f'output_model_name={name}',
-            'trainer.max_epochs=1', 'loader.batch_size=32', 'num_workers=4',
+            'data=tworoom', f'data.dataset.name={dataset}', f'subdir={name}', f'output_model_name={name}',
+            f'trainer.max_epochs={epochs}', 'loader.batch_size=32', 'num_workers=4',
             'loader.persistent_workers=true', 'loader.prefetch_factor=2', '+loader.multiprocessing_context=spawn', '+cpu_threads=1',
             'wandb.enabled=false', 'trainer.precision=bf16-mixed', 'trainer.devices=1', 'seed=3072',
             '+trainer.limit_val_batches=0.0', '+trainer.log_every_n_steps=10',

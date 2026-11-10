@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 import torch
 from episode_data import load_episode_experiment
 from experiment_tracking import state_dict_sha256
+from resumable_training import EpochOrder
 
 
 def read_json(path):
@@ -37,9 +38,9 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def expected_order(bundle):
+def expected_order(bundle, epoch=0):
     spec = bundle['manifest']['training_order']
-    generator = torch.Generator().manual_seed(spec['seed'])
+    generator = torch.Generator().manual_seed(spec['seed'] + epoch)
     base_seed = int(torch.empty((), dtype=torch.int64).random_(generator=generator))
     indices = bundle['arrays']['train_clip_indices']
     order = indices[torch.randperm(len(indices), generator=generator).numpy()]
@@ -50,13 +51,18 @@ def audit_native_checkpoint(checkpoint, checkpoint_path, run_dir, manifest_sha,
                             expected, observed_hash, batch_size, expected_steps):
     """Check durable recovery provenance without changing checkpoint or RNG state."""
     metadata = checkpoint['resumable']
-    assert metadata['version'] == 1 and metadata['backend'] == 'native_pytorch'
+    scheduled = isinstance(expected, EpochOrder)
+    assert metadata['version'] == (2 if scheduled else 1) and metadata['backend'] == 'native_pytorch'
     assert metadata['status'] == 'complete'
     assert metadata['manifest_sha256'] == manifest_sha
     assert metadata['batch_size'] == batch_size
     assert metadata['cursor'] == metadata['total_windows'] == len(expected)
     assert metadata['expected_steps'] == checkpoint['global_step'] == expected_steps
-    np.testing.assert_array_equal(metadata['order'].cpu().numpy(), expected)
+    if scheduled:
+        assert 'order' not in metadata and metadata['order_protocol'] == expected.protocol
+        assert checkpoint['epoch'] == expected.epochs - 1
+    else:
+        np.testing.assert_array_equal(metadata['order'].cpu().numpy(), expected)
     assert metadata['order_sha256'] == metadata['trace_sha256'] == observed_hash
     assert metadata['trace_bytes'] == len(expected) * np.dtype('<i8').itemsize
     assert len(metadata['config_sha256']) == 64
@@ -83,7 +89,11 @@ def audit_native_checkpoint(checkpoint, checkpoint_path, run_dir, manifest_sha,
     generations = [read_json(path) for path in checkpoint_path.parent.glob('step-*.json')]
     assert generations and any(item['global_step'] == 0 for item in generations)
     assert all(0 <= item['global_step'] <= expected_steps for item in generations)
-    return {'backend': 'native_pytorch', 'protocol_version': 1,
+    retained = list(checkpoint_path.parent.glob('step-*.ckpt'))
+    if scheduled:
+        assert 2 <= len(retained) <= 3 and any(p.name.startswith('step-00000000-') for p in retained)
+        assert file_sha256(run_dir / 'first-step-gradients.json') == metadata['extra']['first_step_gradient_sha256']
+    return {'backend': 'native_pytorch', 'protocol_version': metadata['version'], 'retained_generation_count': len(retained),
             'committed_cursor': metadata['cursor'], 'config_sha256': metadata['config_sha256'],
             'generation_id': generation_id, 'checksum_verified': True, 'sha256': digest,
             'rng_states_present': ['python', 'numpy', 'torch_cpu', 'torch_cuda'],
@@ -94,12 +104,17 @@ def audit(args):
     bundle = load_episode_experiment(args.manifest)
     manifest, arrays = bundle['manifest'], bundle['arrays']
     manifest_sha = manifest['manifest_sha256']
-    expected_windows = manifest['counts']['train']['windows']
+    epochs = getattr(args, 'expected_epochs', 1)
+    scheduled = args.expected_objective == 'delta_jepa'
+    assert isinstance(epochs, int) and epochs >= 1 and (scheduled or epochs == 1)
+    windows_per_epoch = manifest['counts']['train']['windows']
+    expected_windows = epochs * windows_per_epoch
     batch_size = manifest['training_order']['batch_size']
     assert isinstance(batch_size, int) and not isinstance(batch_size, bool) and batch_size > 0
-    expected_steps = math.ceil(expected_windows / batch_size)
-    expected_tail = expected_windows - (expected_steps - 1) * batch_size
-    assert expected_steps == manifest['training_order']['steps_per_epoch']
+    epoch_steps = math.ceil(windows_per_epoch / batch_size)
+    expected_steps = epochs * epoch_steps
+    expected_tail = windows_per_epoch - (epoch_steps - 1) * batch_size
+    assert epoch_steps == manifest['training_order']['steps_per_epoch']
     assert 1 <= expected_tail <= batch_size
     assert manifest['training_order']['drop_last'] is False
     assert [manifest['counts'][name]['episodes'] for name in ('train', 'test', 'unused')] == [5000, 3000, 2000]
@@ -126,16 +141,28 @@ def audit(args):
     trace_path = (run_dir / order_record['trace_file']).resolve(strict=True)
     assert trace_path.parent == run_dir, 'Trace must remain inside its run directory'
     assert trace_path.stat().st_size == order_record['trace_bytes'] == expected_windows * np.dtype('<i8').itemsize
-    observed_order = np.fromfile(trace_path, dtype='<i8')
-    expected, base_seed = expected_order(bundle)
-    np.testing.assert_array_equal(observed_order, expected)
-    assert len(np.unique(observed_order)) == expected_windows
-    np.testing.assert_array_equal(np.sort(observed_order), arrays['train_clip_indices'])
+    if scheduled:
+        assert order_record['epochs'] == completion['epochs'] == epochs
+        assert order_record['completed_epochs'] == epochs
+    observed_order = np.memmap(trace_path, dtype='<i8', mode='r')
     observed_hash = file_sha256(trace_path)
-    assert observed_hash == order_record['order_sha256'] == hashlib.sha256(expected.tobytes()).hexdigest()
+    assert observed_hash == order_record['order_sha256']
+    epoch_hashes = []
+    for epoch in range(epochs):
+        expected_epoch, epoch_base_seed = expected_order(bundle, epoch)
+        observed = observed_order[epoch * windows_per_epoch:(epoch + 1) * windows_per_epoch]
+        np.testing.assert_array_equal(observed, expected_epoch)
+        # Check the actual train set independently in every epoch, including each short tail.
+        np.testing.assert_array_equal(np.sort(observed), arrays['train_clip_indices'])
+        epoch_hashes.append(hashlib.sha256(observed).hexdigest())
+        if epoch == 0:
+            base_seed = epoch_base_seed
+    expected = EpochOrder(arrays['train_clip_indices'], manifest['training_order']['seed'], epochs) if scheduled else expected_epoch
+    if scheduled:
+        assert expected.order_hash == observed_hash and epoch_hashes == expected.protocol['epoch_sha256']
     assert observed_order[:len(order_record['first_ids'])].tolist() == order_record['first_ids']
     assert observed_order[-len(order_record['last_ids']):].tolist() == order_record['last_ids']
-    seen_episodes = np.unique(arrays['clip_episode_ids'][observed_order])
+    seen_episodes = np.unique(arrays['clip_episode_ids'][observed_order[:windows_per_epoch]])
     np.testing.assert_array_equal(seen_episodes, np.sort(arrays['train_episode_ids']))
     assert not np.intersect1d(seen_episodes, arrays['test_episode_ids']).size
     assert not np.intersect1d(seen_episodes, arrays['unused_episode_ids']).size
@@ -163,7 +190,7 @@ def audit(args):
     else:
         assert prefetch_factor is None or (isinstance(prefetch_factor, int)
                                            and not isinstance(prefetch_factor, bool) and prefetch_factor > 0)
-    assert cfg.trainer.max_epochs == 1 and cfg.trainer.get('max_steps', -1) == -1
+    assert cfg.trainer.max_epochs == epochs and cfg.trainer.get('max_steps', -1) == -1
     assert initialization['resume_from'] is None, 'The experiment must originate from a fresh initialization'
     if not native_checkpoint:
         assert cfg.get('resume_from') is None
@@ -175,7 +202,10 @@ def audit(args):
         assert cfg.get('checkpoint_every_n_steps') == 1000
     assert cfg.trainer.precision == 'bf16-mixed'
     assert cfg.trainer.get('limit_val_batches', 0) == 0
-    if args.expected_objective == 'mse_only':
+    if scheduled:
+        assert cfg.loss.ldad.weight == args.expected_ldad_weight and cfg.loss.sigreg.weight == args.expected_sigreg_weight
+        assert (cfg.loss.sigreg.weight > 0) == any(k.startswith('sigreg.') for k in checkpoint['state_dict'])
+    elif args.expected_objective == 'mse_only':
         assert cfg.loss.get('sigreg') is None and cfg.loss.get('action_prediction') is None
         assert cfg.model.get('action_predictor') is None
     elif args.expected_objective == 'action_prediction':
@@ -189,14 +219,16 @@ def audit(args):
     model = hydra.utils.instantiate(cfg.model)
     fresh_state = model.state_dict()
     fresh_full_hash = state_dict_sha256(fresh_state)
-    fresh_shared_hash = state_dict_sha256(fresh_state, exclude_prefixes=('action_predictor.',))
+    exclusions = ('action_predictor.', 'ldad.') if scheduled else ('action_predictor.',)
+    assert initialization['shared_state_excluded_prefixes'] == list(exclusions)
+    fresh_shared_hash = state_dict_sha256(fresh_state, exclude_prefixes=exclusions)
     assert fresh_full_hash == initialization['state_sha256'], 'Recorded initialization was not the declared fresh model'
     assert fresh_shared_hash == initialization['shared_state_sha256']
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     assert parameter_count == initialization['parameter_count'] == initialization['trainable_parameter_count']
     assert initialization['state_entry_count'] == len(fresh_state)
-    assert initialization['shared_state_entry_count'] == sum(not name.startswith('action_predictor.') for name in fresh_state)
+    assert initialization['shared_state_entry_count'] == sum(not name.startswith(exclusions) for name in fresh_state)
 
     recovery = (audit_native_checkpoint(checkpoint, checkpoint_path, run_dir, manifest_sha, expected,
                                         observed_hash, batch_size, expected_steps) if native_checkpoint else None)
@@ -217,8 +249,9 @@ def audit(args):
         for event in events:
             assert event['config_sha256'] == config_hash
             assert 0 <= event['windows_seen'] <= expected_windows
-            assert event['windows_seen'] == expected_windows or event['windows_seen'] % batch_size == 0
-            assert event['global_step'] == math.ceil(event['windows_seen'] / batch_size)
+            completed_epochs, within_epoch = divmod(event['windows_seen'], windows_per_epoch)
+            assert within_epoch % batch_size == 0
+            assert event['global_step'] == completed_epochs * epoch_steps + math.ceil(within_epoch / batch_size)
         recovery.update(config_identity_verified=True, resume_count=resume_count)
     assert checkpoint['global_step'] == expected_steps
     for name, value in checkpoint['state_dict'].items():
@@ -235,7 +268,15 @@ def audit(args):
             parameter_steps.append(int(state['step']))
         if 'exp_avg' in state:
             nonzero_moments += int(bool(torch.count_nonzero(state['exp_avg'])))
-    assert len(parameter_steps) == len(trainable_parameters)
+    decoder_disabled = scheduled and cfg.loss.ldad.weight == 0
+    names = [n for n, p in model.named_parameters() if p.requires_grad]
+    if scheduled:
+        assert len(optimizer['param_groups']) == 1
+        ids = optimizer['param_groups'][0]['params']
+        assert len(ids) == len(names)
+        expected_active = {pid for pid, name in zip(ids, names) if not (decoder_disabled and name.startswith('ldad.'))}
+        assert set(optimizer['state']) == expected_active
+    assert len(parameter_steps) == sum(not (decoder_disabled and n.startswith('ldad.')) for n in names)
     assert min(parameter_steps) == max(parameter_steps) == expected_steps
     assert nonzero_moments > 0
     assert len(checkpoint['lr_schedulers']) == 1
@@ -251,26 +292,46 @@ def audit(args):
         assert torch.isfinite(value).all() and torch.equal(value, checkpoint_model[name]), name
     final_state_hash = state_dict_sha256(exported)
     assert final_state_hash != fresh_full_hash, 'Final model is unchanged from initialization'
+    if scheduled:
+        decoder_changed = any(not torch.equal(fresh_state[n], v) for n, v in exported.items() if n.startswith('ldad.'))
+        assert decoder_changed != decoder_disabled
     model.load_state_dict(exported, strict=True)
 
     metrics_path = registry / 'metrics.csv'
-    rows = list(csv.DictReader(metrics_path.open()))
     if native_checkpoint:
         metrics_metadata = checkpoint['resumable']['extra']
         assert metrics_path.stat().st_size == metrics_metadata['metrics_bytes']
         assert file_sha256(metrics_path) == metrics_metadata['metrics_sha256']
-        assert [int(row['step']) for row in rows] == list(range(1, expected_steps + 1))
-        assert all(int(row['epoch']) == 0 for row in rows)
-        recovery['metrics_prefix_checksum_and_exact_steps_verified'] = True
-    assert rows and not any(name.startswith('validate/') for name in rows[0]), 'Training unexpectedly logged validation'
     metrics = {}
     loss_fields = ['fit/loss', 'fit/pred_loss']
-    if args.expected_objective != 'mse_only':
+    if scheduled:
+        loss_fields.append('fit/ldad_loss')
+        if cfg.loss.sigreg.weight > 0:
+            loss_fields.append('fit/sigreg_loss')
+    elif args.expected_objective != 'mse_only':
         loss_fields.append('fit/sigreg_loss' if args.expected_objective == 'sigreg' else 'fit/action_loss')
-    for key in loss_fields:
-        values = [float(row[key]) for row in rows if row.get(key)]
-        assert values and all(math.isfinite(value) for value in values), key
-        metrics[key] = {'logged_count': len(values), 'first': values[0], 'last': values[-1], 'minimum': min(values), 'maximum': max(values)}
+    row_count = 0
+    with metrics_path.open(newline='') as stream:
+        reader = csv.DictReader(stream)
+        assert reader.fieldnames and not any(n.startswith('validate/') for n in reader.fieldnames)
+        for row_count, row in enumerate(reader, 1):
+            if native_checkpoint:
+                assert int(row['step']) == row_count and int(row['epoch']) == (row_count - 1) // epoch_steps
+            for key in loss_fields:
+                if not row.get(key):
+                    assert not native_checkpoint
+                    continue
+                value = float(row[key])
+                assert math.isfinite(value), key
+                item = metrics.setdefault(key, {'logged_count': 0, 'first': value, 'minimum': value, 'maximum': value})
+                item['logged_count'] += 1
+                item['last'] = value
+                item['minimum'] = min(item['minimum'], value)
+                item['maximum'] = max(item['maximum'], value)
+    assert row_count > 0 and set(metrics) == set(loss_fields)
+    if native_checkpoint:
+        assert row_count == expected_steps
+        recovery['metrics_prefix_checksum_and_exact_steps_verified'] = True
     pair = None
     if args.paired_run_dir:
         other = args.paired_run_dir.resolve(strict=True)
@@ -290,9 +351,10 @@ def audit(args):
         'run_dir': str(run_dir), 'objective': args.expected_objective, 'process_exit_code': process_exit_code,
         'manifest': str(args.manifest.resolve()), 'manifest_sha256': manifest_sha,
         'data_provenance': {'counts': manifest['counts'], 'normalization': manifest['normalization'],
-                            'all_train_windows_consumed_exactly_once': True, 'test_and_unused_episodes_not_consumed': True,
+                            'all_train_windows_consumed_exactly_once': epochs == 1, 'all_train_windows_once_per_epoch': True, 'test_and_unused_episodes_not_consumed': True,
                             'expected_steps': expected_steps, 'completed_steps': checkpoint['global_step'],
-                            'windows': expected_windows, 'batch_size': batch_size, 'last_batch_size': expected_tail,
+                            'windows': expected_windows, 'epochs': epochs, 'steps_per_epoch': epoch_steps, 'windows_per_epoch': windows_per_epoch,
+                            'epoch_order_sha256': epoch_hashes, 'batch_size': batch_size, 'last_batch_size': expected_tail,
                             'order_sha256': observed_hash, 'loader_base_seed': base_seed,
                             'training_elapsed_seconds': order_record['elapsed_seconds'], 'validation_during_training': False,
                             'loader': {'num_workers': workers, 'persistent_workers': persistent_workers,

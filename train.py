@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, open_dict
 
 from module import SIGReg
 from training_compute import combined_compute, mse_only_compute
-from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
+from utils import get_column_normalizer, get_img_preprocessor, PreserveExecutedActions, SaveCkptCallback
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -89,7 +89,7 @@ CROSS_EXAMPLE_FIELDS = ("latent_cross_example_count", "latent_cross_example_var"
 
 def tracks_cross_example_latents(cfg):
     objective = cfg.loss.get("type", "sigreg")
-    return objective == "mse_only" or (objective in ("action_prediction", "combined")
+    return objective == "mse_only" or (objective in ("action_prediction", "combined", "delta_jepa")
                                        and cfg.get("track_cross_example_latent_spread", False))
 
 
@@ -150,6 +150,26 @@ def mse_only_forward(self, batch, stage, cfg):
     return _log_computed_output(self, output, stage, cfg, batch["pixels"].size(0))
 
 
+def delta_jepa_forward(self, batch, stage, cfg):
+    """Score the forward prediction and decode raw actions from observed displacements."""
+    output = mse_only_compute(self.model, None, batch["pixels"], batch["action"],
+                              history_size=cfg.history_size, num_preds=1)
+    emb = output["emb"]
+    target_actions = batch["executed_actions"]
+    weight = cfg.loss.ldad.weight
+    with torch.set_grad_enabled(torch.is_grad_enabled() and weight > 0):
+        predicted_actions = self.model.ldad(emb[:, 1:] - emb[:, :-1])
+        if predicted_actions.shape != target_actions.shape:
+            raise ValueError("LDAD predictions must match the recorded per-interval action sequence")
+        output["ldad_loss"] = torch.nn.functional.mse_loss(predicted_actions.float(), target_actions.float())
+    if cfg.loss.sigreg.weight > 0:
+        output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
+        output["loss"] = output["loss"] + cfg.loss.sigreg.weight * output["sigreg_loss"]
+    if weight > 0:
+        output["loss"] = output["loss"] + weight * output["ldad_loss"]
+    return _log_computed_output(self, output, stage, cfg, batch["pixels"].size(0))
+
+
 def compiled_training_forward(self, batch, stage, cfg):
     """Run the tensor objective through Inductor and log outside the graph."""
     output = self.compute_objective(self.model, getattr(self, "sigreg", None),
@@ -161,7 +181,8 @@ def configure_training_objective(cfg, model):
     """Select the forward function and auxiliary module for either trainer."""
     objective = cfg.loss.get("type", "sigreg")
     functions = {"sigreg": lejepa_forward, "action_prediction": action_prediction_forward,
-                 "combined": combined_forward, "mse_only": mse_only_forward}
+                 "combined": combined_forward, "mse_only": mse_only_forward,
+                 "delta_jepa": delta_jepa_forward}
     if objective not in functions:
         raise ValueError(f"Unknown loss type: {objective}")
     if objective == "mse_only" and model.action_predictor is not None:
@@ -170,7 +191,15 @@ def configure_training_objective(cfg, model):
         cfg.num_preds != 1 or model.action_predictor is None
     ):
         raise ValueError("Action prediction requires num_preds=1 and an action_predictor")
-    sigreg = SIGReg(**cfg.loss.sigreg.kwargs) if objective in ("sigreg", "combined") else None
+    if objective == "delta_jepa":
+        if cfg.num_preds != 1 or model.ldad is None or model.action_predictor is not None:
+            raise ValueError("Delta-JEPA requires one-step prediction and the LDAD model")
+        if model.ldad.horizon != cfg.data.dataset.frameskip:
+            raise ValueError("The LDAD query count must match the action interval between observed frames")
+        if min(cfg.loss.ldad.weight, cfg.loss.sigreg.weight) < 0:
+            raise ValueError("Delta-JEPA loss weights must be nonnegative")
+    use_sigreg = objective in ("sigreg", "combined") or (objective == "delta_jepa" and cfg.loss.sigreg.weight > 0)
+    sigreg = SIGReg(**cfg.loss.sigreg.kwargs) if use_sigreg else None
     return functions[objective], sigreg
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
@@ -208,6 +237,8 @@ def run(cfg):
             cfg.episode_manifest = episode_bundle["manifest_path"]
             cfg.episode_manifest_sha256 = episode_bundle["manifest"]["manifest_sha256"]
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
+    if cfg.loss.get("type") == "delta_jepa":
+        transforms.insert(0, PreserveExecutedActions(cfg.data.dataset.frameskip))
     
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:

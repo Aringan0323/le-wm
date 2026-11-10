@@ -10,6 +10,22 @@ def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     return dt.transforms.Compose(to_image, resize)
 
 
+class PreserveExecutedActions:
+    """Retain actions between the strided observations, before z-scoring inputs."""
+
+    def __init__(self, frameskip):
+        if frameskip < 1:
+            raise ValueError("LDAD requires a positive action horizon")
+        self.frameskip = frameskip
+
+    def __call__(self, sample):
+        action = sample["action"]  # [raw steps, continuous action coordinates]
+        intervals = (action.shape[0] - 1) // self.frameskip
+        target = action[:intervals * self.frameskip].reshape(intervals, self.frameskip, action.shape[-1])
+        # The dataset packs only its 'action' key after the transform.
+        return {**sample, "executed_actions": target.clone()}
+
+
 class ZScoreNormalizer:
     """Picklable z-score normalizer — uses a class instead of a closure so it
     survives pickle when DataLoader workers are spawned (required by LanceDataset)."""

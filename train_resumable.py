@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -21,7 +22,7 @@ from omegaconf import OmegaConf, open_dict
 from episode_data import get_episode_normalizer, load_episode_experiment
 from experiment_tracking import initialization_record
 from resumable_training import (
-    CheckpointManager, DurableTrainingTrace, FixedOrderBatchSampler,
+    CheckpointManager, DurableTrainingTrace, EpochOrder, FixedOrderBatchSampler,
     IndexedWindowDataset, atomic_json, file_sha256, json_hash, make_fixed_order,
     capture_rng_state, pause_requested, restore_rng_state, utc_now,
 )
@@ -34,29 +35,43 @@ class MetricsWriter:
     def __init__(self, path, fields, resume=None):
         self.path = Path(path)
         self.fields = fields
+        self.digest = hashlib.sha256()
         if resume is None:
-            self.stream = self.path.open("x", newline="", encoding="utf-8")
-            self.writer = csv.DictWriter(self.stream, fields, lineterminator="\n")
+            self.stream = self.path.open("xb")
+            self.writer = csv.DictWriter(self, fields, lineterminator="\n")
             self.writer.writeheader()
         else:
             length = int(resume["metrics_bytes"])
             with self.path.open("rb") as source:
-                prefix = source.read(length)
-                tail = source.read()
-            if len(prefix) != length or hashlib.sha256(prefix).hexdigest() != resume["metrics_sha256"]:
-                raise ValueError("CSV metrics prefix differs from the resume checkpoint")
+                remaining = length
+                while remaining:
+                    block = source.read(min(remaining, 1024 * 1024))
+                    if not block:
+                        raise ValueError("Metrics file is shorter than its checkpoint")
+                    self.digest.update(block)
+                    remaining -= len(block)
+                if self.digest.hexdigest() != resume["metrics_sha256"]:
+                    raise ValueError("CSV metrics prefix differs from the resume checkpoint")
+                tail = self.path.stat().st_size - length
+                if tail:
+                    backup = self.path.with_name(f"metrics.abandoned-{uuid.uuid4().hex}.csv")
+                    with backup.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
             if tail:
-                backup = self.path.with_name(f"metrics.abandoned-{uuid.uuid4().hex}.csv")
-                with backup.open("xb") as output:
-                    output.write(tail)
-                    output.flush()
-                    os.fsync(output.fileno())
                 with self.path.open("r+b") as output:
                     output.truncate(length)
                     output.flush()
                     os.fsync(output.fileno())
-            self.stream = self.path.open("a", newline="", encoding="utf-8")
-            self.writer = csv.DictWriter(self.stream, fields, lineterminator="\n")
+            self.stream = self.path.open("ab")
+            self.writer = csv.DictWriter(self, fields, lineterminator="\n")
+
+    def write(self, text):
+        raw = text.encode("utf-8")
+        self.stream.write(raw)
+        self.digest.update(raw)
+        return len(text)
 
     def append(self, values):
         self.writer.writerow(values)
@@ -65,7 +80,7 @@ class MetricsWriter:
         self.stream.flush()
         os.fsync(self.stream.fileno())
         return {"metrics_bytes": self.path.stat().st_size,
-                "metrics_sha256": file_sha256(self.path)}
+                "metrics_sha256": self.digest.hexdigest()}
 
     def flush(self):
         self.stream.flush()
@@ -77,11 +92,31 @@ class MetricsWriter:
             self.stream.close()
 
 
+def delta_gradient_evidence(model, decoder_enabled):
+    """Check the first actual backward pass, before clipping or the optimizer update."""
+    record = {}
+    for label, decoder in (("shared", False), ("ldad", True)):
+        parameters = [p for name, p in model.named_parameters() if p.requires_grad and name.startswith("ldad.") == decoder]
+        gradients = [p.grad for p in parameters if p.grad is not None]
+        required = not decoder or decoder_enabled
+        if not parameters or len(gradients) != (len(parameters) if required else 0):
+            raise ValueError(f"Unexpected first-step gradient coverage for {label}")
+        norm = torch.stack([g.detach().norm().float() for g in gradients]).norm().item() if gradients else 0.0
+        if not math.isfinite(norm) or (required and norm == 0):
+            raise FloatingPointError(f"Unexpected first-step gradient norm for {label}: {norm}")
+        record[label] = {"parameter_tensors": len(parameters), "gradient_tensors": len(gradients), "l2_norm": norm}
+    return record
+
+
 def _train(cfg):
     if not cfg.get("episode_manifest") or not cfg.get("run_metadata_dir"):
         raise ValueError("Resumable training requires episode_manifest and run_metadata_dir")
-    if cfg.trainer.max_epochs != 1 or cfg.trainer.get("max_steps", -1) != -1:
-        raise ValueError("This experiment requires one complete epoch without a step cap")
+    objective = cfg.loss.get("type", "sigreg")
+    epochs = cfg.trainer.max_epochs
+    if type(epochs) is not int or epochs < 1 or cfg.trainer.get("max_steps", -1) != -1:
+        raise ValueError("Specify a positive number of complete epochs without a step cap")
+    if epochs != 1 and objective != "delta_jepa":
+        raise ValueError("Existing non-Delta episode experiments are single-pass")
     if cfg.get("compile_training", False):
         raise ValueError("The resumable experiment uses eager execution for RNG-continuous recovery")
     seed = int(cfg.seed)
@@ -104,6 +139,9 @@ def _train(cfg):
     if batch_size != manifest["training_order"]["batch_size"]:
         raise ValueError("Batch size differs from the immutable experiment manifest")
     transforms = [get_img_preprocessor("pixels", "pixels", cfg.img_size)]
+    if objective == "delta_jepa":
+        from utils import PreserveExecutedActions
+        transforms.insert(0, PreserveExecutedActions(cfg.data.dataset.frameskip))
     for column in cfg.data.dataset.keys_to_load:
         if not column.startswith("pixels"):
             transforms.append(get_episode_normalizer(bundle, column))
@@ -116,11 +154,23 @@ def _train(cfg):
     fingerprint_config = {key: value for key, value in resolved_config.items()
                           if key not in ("resume_from", "control_file")}
     config_sha256 = json_hash(fingerprint_config)
-    order = make_fixed_order(bundle["arrays"]["train_clip_indices"], seed)
+    train_indices = bundle["arrays"]["train_clip_indices"]
+    order = EpochOrder(train_indices, seed, epochs) if objective == "delta_jepa" else make_fixed_order(train_indices, seed)
     sampler = FixedOrderBatchSampler(order, batch_size)
-    total_steps = math.ceil(len(order) / batch_size)
-    if total_steps != manifest["training_order"]["steps_per_epoch"]:
+    total_steps = sampler.total_steps
+    if sampler.steps_per_epoch != manifest["training_order"]["steps_per_epoch"]:
         raise ValueError("Expected step count differs from the experiment manifest")
+
+    if isinstance(order, EpochOrder):
+        schedule_record = {**order.protocol, "manifest_sha256": manifest["manifest_sha256"],
+                           "order_sha256": order.order_hash, "batch_size": batch_size,
+                           "steps_per_epoch": sampler.steps_per_epoch, "expected_steps": sampler.total_steps}
+        schedule_path = run_dir / "order-protocol.json"
+        if resume_path:
+            if json.loads(schedule_path.read_text()) != schedule_record:
+                raise ValueError("Saved epoch order protocol differs from this configuration")
+        else:
+            atomic_json(schedule_path, schedule_record)
 
     model = hydra.utils.instantiate(cfg.model)
     if not resume_path:
@@ -137,7 +187,6 @@ def _train(cfg):
     else:
         raise ValueError("Choose an explicit gpu or cpu accelerator")
     model.to(device).train()
-    objective = cfg.loss.get("type", "sigreg")
     forward, sigreg = configure_training_objective(cfg, model)
     if sigreg is not None:
         sigreg.to(device)
@@ -161,6 +210,8 @@ def _train(cfg):
         metric_names += ["fit/sigreg_loss"]
     if objective in ("action_prediction", "combined"):
         metric_names += ["fit/action_loss", "fit/latent_std", "fit/action_embedding_std", "fit/predicted_action_std"]
+    if objective == "delta_jepa":
+        metric_names.append("fit/ldad_loss")
     if tracks_cross_example_latents(cfg):
         metric_names.extend("fit/" + name for name in CROSS_EXAMPLE_FIELDS)
     metrics = MetricsWriter(run_dir / "metrics.csv", ["step", "epoch", *metric_names],
@@ -215,7 +266,11 @@ def _train(cfg):
             "resume_count": len(events),
             "expected_steps": total_steps, "expected_windows": len(order),
             "optimizer_steps": sampler.global_step, "batches_seen": sampler.global_step,
-            "last_batch_size": (sampler.cursor % batch_size or batch_size) if sampler.cursor else 0,
+            "last_batch_size": sampler.last_batch_size,
+            "epochs": epochs, "steps_per_epoch": sampler.steps_per_epoch, "windows_per_epoch": sampler.windows_per_epoch,
+            "completed_epochs": sampler.cursor // sampler.windows_per_epoch,
+            "current_epoch": min(epochs, sampler.cursor // sampler.windows_per_epoch + 1),
+            "windows_in_epoch": sampler.cursor % sampler.windows_per_epoch if sampler.cursor < len(order) else sampler.windows_per_epoch,
             "elapsed_seconds": elapsed,
             "eta_seconds": elapsed * (total_steps - sampler.global_step) / sampler.global_step if sampler.global_step else None,
             "last_train_loss": last_values.get("fit/loss"),
@@ -234,10 +289,17 @@ def _train(cfg):
         atomic_json(run_dir / "progress.json", record)
         return record
 
+    first_gradient_hash = metadata["extra"].get("first_step_gradient_sha256") if metadata else None
+    if objective == "delta_jepa" and sampler.cursor:
+        if not first_gradient_hash or file_sha256(run_dir / "first-step-gradients.json") != first_gradient_hash:
+            raise ValueError("Initial gradient evidence differs from the resume checkpoint")
+
     def save(status="running", final=False):
         extra = {"elapsed_seconds": resumed_elapsed + time.monotonic() - session_start,
                  "started_utc": started_utc, "objective": objective,
                  "last_values": last_values, **metrics.checkpoint_metadata()}
+        if objective == "delta_jepa":
+            extra["first_step_gradient_sha256"] = first_gradient_hash
         return checkpoints.save(model, optimizer, scheduler, sigreg, sampler, trace,
                                 status=status, extra=extra, final=final)
 
@@ -265,6 +327,12 @@ def _train(cfg):
             if not torch.isfinite(output["loss"]).item():
                 raise FloatingPointError("Nonfinite training loss; retaining the last valid durable checkpoint")
             output["loss"].backward()
+            if objective == "delta_jepa" and sampler.global_step == 0:
+                gradients = delta_gradient_evidence(model, cfg.loss.ldad.weight > 0)
+                term_dtypes = {name: str(value.dtype) for name, value in output.items() if name in ("pred_loss", "ldad_loss", "sigreg_loss", "loss")}
+                atomic_json(run_dir / "first-step-gradients.json", {"step": 1, "config_sha256": config_sha256,
+                                                                    "term_dtypes": term_dtypes, **gradients})
+                first_gradient_hash = file_sha256(run_dir / "first-step-gradients.json")
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.trainer.gradient_clip_val),
                                           error_if_nonfinite=True)
             optimizer.step()
@@ -277,7 +345,7 @@ def _train(cfg):
             if not all(math.isfinite(value) for value in last_values.values()):
                 last_values = {key: value if math.isfinite(value) else None for key, value in last_values.items()}
                 raise FloatingPointError("Nonfinite training diagnostic; retaining the last valid checkpoint")
-            metrics.append({"step": sampler.global_step, "epoch": 0, **last_values})
+            metrics.append({"step": sampler.global_step, "epoch": (sampler.cursor - 1) // sampler.windows_per_epoch, **last_values})
             if pause_requested(cfg.get("control_file")):
                 save("paused")
                 progress("paused")
@@ -294,14 +362,15 @@ def _train(cfg):
             raise RuntimeError("Training ended before all fixed-order windows were committed")
         final_checkpoint = save("complete", final=True)
         swm.wm.utils.save_pretrained(model, run_name=cfg.output_model_name,
-                                     config=cfg.model, filename="weights_epoch_1.pt")
+                                     config=cfg.model, filename=f"weights_epoch_{epochs}.pt")
         summary = progress("complete")
         atomic_json(run_dir / "data-order.json", summary)
         atomic_json(run_dir / "runcompletion.json", {
             "passed": True, "backend": "native_pytorch", "global_step": sampler.global_step,
-            "expected_steps": total_steps, "expected_windows": len(order),
+            "expected_steps": total_steps, "expected_windows": len(order), "epochs": epochs,
+            "steps_per_epoch": sampler.steps_per_epoch, "windows_per_epoch": sampler.windows_per_epoch,
             "final_ckpt_path": str(final_checkpoint),
-            "export_path": str(export_dir / "weights_epoch_1.pt"),
+            "export_path": str(export_dir / f"weights_epoch_{epochs}.pt"),
             "registry_run": str(run_dir), "manifest_sha256": manifest["manifest_sha256"],
             "objective": objective, "resume_count": len(events), "completed_utc": utc_now()})
         return 0

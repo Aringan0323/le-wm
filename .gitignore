@@ -1,0 +1,28 @@
+# Python and editor state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.vscode/
+.idea/
+
+# Experiment data, runtime state, models, and downloads
+/.env
+/.env.*
+/datasets/
+/storage/
+/storage-local/
+/logs/
+/cache/
+/experiments/
+/training/
+/outputs/
+/multirun/
+/wandb/
+*.h5
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.i64
+*.log

@@ -6,7 +6,9 @@ import shutil
 import sys
 
 from combined_sweep_config import COMBINED, MSE_ONLY, REFERENCE, VARIANTS
-from run_episode_comparison import ROOT, Pipeline, read_json, run_locked, train_command, verify_source
+from delta_sweep_config import VARIANTS as DELTA_VARIANTS
+from experiment_paths import REPORTS
+from run_episode_comparison import ROOT, Pipeline, read_json, run_locked, verify_source
 
 
 class SweepPipeline(Pipeline):
@@ -19,10 +21,11 @@ class SweepPipeline(Pipeline):
         env = dict(os.environ, LEWM_REPO=str(source), PYTHONPATH=str(source), PYTHONUNBUFFERED="1",
                    OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
         manifest = read_json(self.experiment / "manifest.json")
-        expected = manifest["training_order"]["steps_per_epoch"]
+        plan = read_json(self.experiment / "plan.json")
+        expected = manifest["training_order"]["steps_per_epoch"] * plan["epochs"]
         done = run_dir / "runcompletion.json"
         if not done.exists():
-            command = train_command(variant.label, variant.config, variant.model, self.experiment)
+            command = list(plan["training_commands"][variant.label])
             checkpoint = run_dir / "checkpoints/last.ckpt"
             if checkpoint.exists():
                 command.append(f"+resume_from={checkpoint}")
@@ -36,17 +39,20 @@ class SweepPipeline(Pipeline):
         if not completion["passed"] or completion["global_step"] != expected or completion["objective"] != variant.objective:
             raise ValueError(f"{variant.label} did not finish the expected optimizer updates")
         verify_source(self.experiment)
-        shared_args = ["--variant", variant.label, "--experiment-dir", str(self.experiment),
-                       "--reference-dir", str(REFERENCE), "--combined-reference-dir", str(COMBINED)]
-        self.child(f"audit_{variant.label}", [sys.executable, "-u", str(scripts / "audit_combined_sweep.py"), *shared_args],
+        delta = variant.label in DELTA_VARIANTS
+        shared_args = ["--variant", variant.label, "--experiment-dir", str(self.experiment)]
+        if not delta:
+            shared_args.extend(["--reference-dir", str(REFERENCE), "--combined-reference-dir", str(COMBINED)])
+        audit_script = "audit_delta_experiment.py" if delta else "audit_combined_sweep.py"
+        self.child(f"audit_{variant.label}", [sys.executable, "-u", str(scripts / audit_script), *shared_args],
                    run_dir / "audit-console.log", env)
         if not read_json(run_dir / "final-audit.json")["passed"]:
             raise ValueError(f"{variant.label} training audit failed")
 
         output = self.experiment / "evaluation"
-        self.child("evaluate_next_embedding",
-                   [sys.executable, "-u", str(scripts / "evaluate_combined_sweep.py"), *shared_args,
-                    "--mse-reference-dir", str(MSE_ONLY)],
+        eval_script = "evaluate_delta_experiment.py" if delta else "evaluate_combined_sweep.py"
+        eval_args = shared_args if delta else [*shared_args, "--mse-reference-dir", str(MSE_ONLY)]
+        self.child("evaluate_next_embedding", [sys.executable, "-u", str(scripts / eval_script), *eval_args],
                    output / "console.log", env, output / "progress.json")
         results = read_json(output / "results.json")
         counts = manifest["counts"]["test"]
@@ -54,6 +60,13 @@ class SweepPipeline(Pipeline):
             raise ValueError(f"{variant.label} evaluation did not cover the sealed test split")
         if set(results["test_latent_variation"]) != {"bf16_mixed", "fp32"}:
             raise ValueError(f"{variant.label} held-out encoder diagnostics are incomplete")
+        if plan.get("evaluate_planning"):
+            planning = self.experiment / "planning"
+            self.child("evaluate_planning", [sys.executable, "-u", str(scripts / "plan_delta_experiment.py"),
+                       *shared_args], planning / "console.log", env, planning / "progress.json")
+            if not read_json(planning / "results.json").get("passed"):
+                raise ValueError("Planning evaluation did not finish successfully")
+            shutil.copytree(planning, self.host_output / "planning", dirs_exist_ok=True)
         shutil.copytree(run_dir, self.host_output / "runs" / variant.label, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("checkpoints"))
         shutil.copytree(output, self.host_output / "evaluation", dirs_exist_ok=True)
@@ -66,11 +79,13 @@ class SweepPipeline(Pipeline):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", required=True, choices=VARIANTS)
+    variants = {**VARIANTS, **DELTA_VARIANTS}
+    parser.add_argument("--variant", required=True, choices=variants)
     args = parser.parse_args()
-    SweepPipeline.variant = VARIANTS[args.variant]
+    SweepPipeline.variant = variants[args.variant]
     SweepPipeline.experiment = SweepPipeline.variant.experiment
-    SweepPipeline.host_output = Path("/mnt/c/Users/Adam/Desktop/AI/lewm-wsl/experiments") / SweepPipeline.experiment.name
+    plan = read_json(SweepPipeline.experiment / "plan.json")
+    SweepPipeline.host_output = Path(plan.get("report_directory", REPORTS / SweepPipeline.experiment.name))
     run_locked(SweepPipeline)
 
 

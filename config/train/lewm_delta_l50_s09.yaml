@@ -1,0 +1,7 @@
+defaults:
+  - lewm_delta_l0_s09
+  - _self_
+
+loss:
+  ldad:
+    weight: 50.0
