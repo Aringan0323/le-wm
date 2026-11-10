@@ -40,11 +40,11 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def train_command(label, config, name, experiment=EXPERIMENT, epochs=1, dataset=None):
+def train_command(label, config, name, experiment=EXPERIMENT, epochs=1, dataset=None, batch_size=32):
     dataset = dataset or ROOT / 'storage-local/datasets/tworoom.h5'
     return [sys.executable, '-u', str(experiment / 'source/train_resumable.py'), '--config-name', config,
             'data=tworoom', f'data.dataset.name={dataset}', f'subdir={name}', f'output_model_name={name}',
-            f'trainer.max_epochs={epochs}', 'loader.batch_size=32', 'num_workers=4',
+            f'trainer.max_epochs={epochs}', f'loader.batch_size={batch_size}', 'num_workers=4',
             'loader.persistent_workers=true', 'loader.prefetch_factor=2', '+loader.multiprocessing_context=spawn', '+cpu_threads=1',
             'wandb.enabled=false', 'trainer.precision=bf16-mixed', 'trainer.devices=1', 'seed=3072',
             '+trainer.limit_val_batches=0.0', '+trainer.log_every_n_steps=10',

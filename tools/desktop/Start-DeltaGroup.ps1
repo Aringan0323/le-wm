@@ -1,6 +1,7 @@
 param(
     [string]$GroupName = 'episode50-delta-shared-20261110-01',
     [ValidateRange(1,1000)][int]$Epochs = 50,
+    [ValidateRange(1,2147483647)][int]$BatchSize = 32,
     [string]$WslRepo = $env:LEWM_WSL_REPO,
     [switch]$Prepared
 )
@@ -21,13 +22,13 @@ $linuxGroup = ($prior.linux_experiment -replace '/[^/]+$', '') + '/' + $GroupNam
 $hostGroup = Join-Path (Split-Path $prior.host_output -Parent) $GroupName
 $uncGroup = Join-Path (Split-Path $prior.windows_path -Parent) $GroupName
 if (-not $Prepared) {
-    & wsl.exe -d $LeWMDistro --exec bash "$WslRepo/lewm.sh" python "$WslRepo/scripts/prepare_delta_group.py" --manifest-dir $prior.linux_experiment --experiment-dir $linuxGroup --epochs $Epochs
+    & wsl.exe -d $LeWMDistro --exec bash "$WslRepo/lewm.sh" python "$WslRepo/scripts/prepare_delta_group.py" --manifest-dir $prior.linux_experiment --experiment-dir $linuxGroup --epochs $Epochs --batch-size $BatchSize
     if ($LASTEXITCODE -ne 0) { throw 'Could not prepare shared-batch experiment.' }
 }
 $plan = Get-Content -Raw -LiteralPath (Join-Path $uncGroup 'plan.json') | ConvertFrom-Json
 $ready = Get-Content -Raw -LiteralPath (Join-Path $uncGroup 'status.json') | ConvertFrom-Json
 $control = Get-Content -Raw -LiteralPath (Join-Path $uncGroup 'control.json') | ConvertFrom-Json
-if (-not $plan.shared_batch -or $plan.epochs -ne $Epochs -or $ready.status -ne 'prepared' -or $control.request -ne 'run') {
+if (-not $plan.shared_batch -or $plan.epochs -ne $Epochs -or $plan.training_batch_size -ne $BatchSize -or $ready.status -ne 'prepared' -or $control.request -ne 'run') {
     throw 'Group is not ready for fresh launch. For a paused active group use Resume.'
 }
 $history = @($prior.comparison_experiments | Where-Object {$_})

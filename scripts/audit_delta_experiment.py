@@ -144,7 +144,9 @@ def audit_delta(experiment, variant, historical_reference=REFERENCE, group=None)
     assert cfg.optimizer.type == "AdamW" and cfg.optimizer.lr == 5e-5 and cfg.trainer.gradient_clip_val == 1.0
     assert cfg.track_cross_example_latent_spread is True
     assert data["all_train_windows_once_per_epoch"] and data["test_and_unused_episodes_not_consumed"]
-    assert data["windows_per_epoch"] == 365657 and data["steps_per_epoch"] == 11427 and data["last_batch_size"] == 25
+    assert data["windows_per_epoch"] == plan["train_windows"] == 365657
+    assert data["batch_size"] == plan["training_batch_size"]
+    assert data["completed_steps"] == plan["steps_per_model"] == epochs * data["steps_per_epoch"]
     protocol = read_json(run / "order-protocol.json")
     assert protocol["epochs"] == epochs and protocol["order_sha256"] == data["order_sha256"]
     assert protocol["epoch_sha256"] == data["epoch_order_sha256"] and protocol["manifest_sha256"] == manifest["manifest_sha256"]

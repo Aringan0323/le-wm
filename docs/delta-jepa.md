@@ -47,6 +47,8 @@ python scripts/prepare_delta_group.py --experiment-dir "$GROUP" --manifest-dir "
 bash "$GROUP/run.sh"
 ```
 
+The training batch size defaults to 32. Pass `--batch-size 80` in WSL or `-BatchSize 80` on the desktop launcher to start a fresh group at batch size 80. On the fixed Two-Room split, this gives 4,571 updates per epoch and a final batch of 57. The same windows are visited in the same order. All held-out evaluations use batch size 8. To measure a candidate on a free GPU, run `python scripts/probe_delta_batch.py --experiment-dir "$GROUP" --batch-size 80 --steps 4` against a stopped group.
+
 The dashboard launcher for a fresh group is `tools/desktop/Start-DeltaGroup.ps1`. It uses the active experiment's sealed split after the old run has completed or been cancelled. One Pause request checkpoints all three models at the same committed batch. Resume restores this common generation. The live group counter advances once after updating all three models. `gpu-telemetry.csv` records device-wide samples and `gpu-telemetry.json` gives a rolling utilization average and a training ETA. Held-out evaluation for each model follows training.
 
 ### Sequential queue

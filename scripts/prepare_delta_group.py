@@ -1,6 +1,7 @@
 """Freeze three matched Delta models for a single shared-batch training process."""
 import argparse
 import json
+import math
 import shlex
 import shutil
 import sys
@@ -9,16 +10,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from delta_sweep_config import VARIANTS
+from evaluate_episode_experiment import json_hash
 from experiment_paths import REPORTS, ROOT
 from prepare_variant import REPO, describe
 from run_episode_comparison import now, read_json, sha, train_command, verify_source, write_json
 
 
-def prepare(group, split, epochs=50, reports=REPORTS):
+def prepare(group, split, epochs=50, reports=REPORTS, batch_size=32):
     group, split = group.resolve(), split.resolve()
     mirror = reports.resolve() / group.name
     if epochs < 1:
         raise ValueError("epochs must be positive")
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
     # Use the group name to generate model namespaces and to permit later repetitions.
     if group.name == "episode50-delta-shared-20261110-01":
         names = {k: v.model + "-shared" for k, v in VARIANTS.items()}
@@ -29,13 +33,17 @@ def prepare(group, split, epochs=50, reports=REPORTS):
         if path.exists():
             raise FileExistsError(f"Fresh namespace is already in use: {path}")
     manifest = read_json(split / "manifest.json")
-    if sha(split / "arrays.npz") != manifest["arrays_sha256"] or manifest["training_order"]["batch_size"] != 32:
-        raise ValueError("Expected the verified batch-32 Two-Room split")
-    stamp = now()
-    steps = manifest["training_order"]["steps_per_epoch"] * epochs
+    source_hash = manifest.pop("manifest_sha256")
+    if json_hash(manifest) != source_hash or sha(split / "arrays.npz") != manifest["arrays_sha256"]:
+        raise ValueError("Source manifest or split archive failed checksum validation")
     train, test, unused = (manifest["counts"][s] for s in ("train", "test", "unused"))
+    epoch_steps = math.ceil(train["windows"] / batch_size)
+    manifest["training_order"].update(batch_size=batch_size, steps_per_epoch=epoch_steps)
+    manifest["manifest_sha256"] = json_hash(manifest)
+    stamp = now()
+    steps = epoch_steps * epochs
     common = dict(created_utc=stamp, manifest_sha256=manifest["manifest_sha256"], epochs=epochs,
-                  steps_per_model=steps, training_batch_size=32, checkpoint_interval_seconds=300,
+                  source_manifest_sha256=source_hash, steps_per_model=steps, training_batch_size=batch_size, checkpoint_interval_seconds=300,
                   train_episodes=train["episodes"], test_episodes=test["episodes"], unused_episodes=unused["episodes"],
                   train_windows=train["windows"], train_window_visits=train["windows"]*epochs, test_windows=test["windows"],
                   seed=3072, fresh_initialization=True, same_training_order=True, pause_resume=True,
@@ -50,8 +58,8 @@ def prepare(group, split, epochs=50, reports=REPORTS):
             dest = source / f.relative_to(REPO)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dest)
-        for f in ("manifest.json", "arrays.npz"):
-            shutil.copy2(split/f, stage/f)
+        shutil.copy2(split/"arrays.npz", stage/"arrays.npz")
+        write_json(stage/"manifest.json", manifest)
         write_json(stage/"source-snapshot.json", dict(created_utc=stamp, source=str(group/"source"),
                    files_sha256={str(f.relative_to(source)):sha(f) for f in sorted(source.rglob("*")) if f.is_file()}))
         verify_source(stage)
@@ -69,7 +77,7 @@ def prepare(group, split, epochs=50, reports=REPORTS):
             here.mkdir(parents=True)
             for f in ("source", "source-snapshot.json", "manifest.json", "arrays.npz", "control.json"):
                 (here/f).symlink_to(Path("../..")/f, target_is_directory=(f=="source"))
-            command = train_command(k,v.config,names[k],member,epochs,manifest["dataset"]["path"])
+            command = train_command(k,v.config,names[k],member,epochs,manifest["dataset"]["path"],batch_size=batch_size)
             command = [f"+control_file={group/'control.json'}" if arg.startswith("+control_file=") else arg
                        for arg in command]
             if not v.ldad_weight:
@@ -104,7 +112,8 @@ if __name__ == "__main__":
     parser.add_argument("--experiment-dir", required=True, type=Path)
     parser.add_argument("--manifest-dir", required=True, type=Path)
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--reports", type=Path, default=REPORTS)
     args = parser.parse_args()
-    plan = prepare(args.experiment_dir, args.manifest_dir, args.epochs, args.reports)
+    plan = prepare(args.experiment_dir, args.manifest_dir, args.epochs, args.reports, batch_size=args.batch_size)
     print(json.dumps({"experiment":str(args.experiment_dir),"models":plan["model_names"],"shared_steps":plan["steps_per_model"]}))
