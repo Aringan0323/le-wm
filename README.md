@@ -1,5 +1,8 @@
 
 # LeWorldModel
+
+This fork contains the Two-Room Delta-JEPA experiments, their training and evaluation code, and the local dashboard on the [delta-jepa branch](https://github.com/Aringan0323/le-wm/tree/delta-jepa). See the [WSL run instructions](docs/delta-jepa.md) and the [diff against upstream main](https://github.com/Aringan0323/le-wm/compare/main...delta-jepa).
+
 ### Stable End-to-End Joint-Embedding Predictive Architecture from Pixels
 
 [Lucas Maes*](https://x.com/lucasmaes_), [Quentin Le Lidec*](https://quentinll.github.io/), [Damien Scieur](https://scholar.google.com/citations?user=hNscQzgAAAAJ&hl=fr), [Yann LeCun](https://yann.lecun.com/) and [Randall Balestriero](https://randallbalestriero.github.io/)

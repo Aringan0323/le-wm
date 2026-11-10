@@ -1,0 +1,341 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LeWM · Training monitor</title><style>
+:root{--ink:#18263b;--muted:#6c788a;--line:#e2e7ed;--bg:#f4f7fa;--blue:#2563eb;--orange:#dc7633}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1240px;margin:auto;padding:34px 28px 48px}header{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700}h1{font-size:28px;line-height:1.2;margin:6px 0 5px;letter-spacing:-.7px}h2{font-size:16px;margin:0;letter-spacing:-.2px}.subtle{color:var(--muted);font-size:12px}.controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap;justify-content:flex-end}button{font:inherit;font-weight:600;border-radius:9px;padding:9px 14px;border:1px solid #cbd5e1;background:white;color:var(--ink);cursor:pointer}button.primary{background:var(--blue);border-color:var(--blue);color:white}button:disabled{opacity:.42;cursor:default}button:focus-visible{outline:3px solid #93c5fd;outline-offset:2px}.badge{display:inline-flex;align-items:center;gap:7px;border-radius:20px;padding:5px 11px;background:#e8edf3;color:#516179;font-size:12px;font-weight:650}.badge:before{content:"";width:6px;height:6px;border-radius:100%;background:currentColor}.badge.running{background:#e4f3ee;color:#16765e}.badge.paused{background:#fff0d9;color:#9c6418}.badge.failed{background:#fee9e7;color:#b44234}.badge.complete{background:#e5edff;color:#245bba}.notice{border:1px solid #e8d4a5;background:#fff9e8;border-radius:11px;padding:11px 15px;margin:0 0 18px;color:#806228;display:none}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}.card{background:white;border:1px solid var(--line);border-radius:14px;box-shadow:0 3px 10px #16243b03}.stat{padding:18px 19px}.stat-label{font-size:12px;color:var(--muted);margin-bottom:8px}.stat-value{font-size:25px;font-weight:650;letter-spacing:-.6px;line-height:1.2}.stat-detail{font-size:11px;color:var(--muted);margin-top:9px}.meter{height:4px;background:#e9eef4;border-radius:4px;overflow:hidden;margin-top:10px}.meter span{display:block;height:100%;background:var(--blue);border-radius:4px}.models{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}.model{padding:20px}.model-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.model-title{display:flex;align-items:center;gap:9px}.dot{height:9px;width:9px;display:inline-block;border-radius:50%}.model-name{font-size:11px;color:var(--muted);margin:7px 0 18px;overflow-wrap:anywhere}.model-progress{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.big{font-size:29px;font-weight:650;letter-spacing:-.8px}.step-info{font-size:12px;color:var(--muted)}.progress{height:7px;background:#e9edf3;border-radius:8px;overflow:hidden;margin:11px 0 18px}.progress>div{height:100%;border-radius:8px;transition:width .4s}.model-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.model-grid label{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.model-grid strong{font-size:14px;font-weight:600}.foot{padding-top:15px;margin-top:15px;border-top:1px solid #edf0f5;display:flex;justify-content:space-between;gap:14px;font-size:11px;color:var(--muted)}.chart-card{padding:20px;margin-bottom:20px}.section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:16px}.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px}.legend span{display:flex;gap:7px;align-items:center}.chart{width:100%;height:280px;display:block}.chart-empty{height:265px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:linear-gradient(white,#f9fbfd);border-radius:9px;border:1px dashed #dde5ef}.options{display:flex;gap:18px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:10px}.options label{display:flex;gap:6px;align-items:center}.options input{accent-color:var(--blue)}.chart-note{font-size:11px;color:var(--muted);margin-top:9px}.bottom{display:grid;grid-template-columns:1fr 1fr;gap:18px}.panel{padding:20px}.panel p{margin:8px 0;color:var(--muted);font-size:12px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:13px}th{text-align:left;color:var(--muted);font-weight:500}td,th{padding:10px 0;border-bottom:1px solid #edf0f5}td:last-child,th:last-child{text-align:right}pre{background:#f7f9fc;border:1px solid #edf0f5;border-radius:8px;padding:12px;max-height:210px;overflow:auto;font:10px/1.6 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:#536174;margin:14px 0 0}details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:13px}footer{margin-top:20px;font-size:11px;color:#8b95a4;display:flex;justify-content:space-between;gap:15px}@media(max-width:850px){.stats{grid-template-columns:repeat(2,1fr)}.bottom{grid-template-columns:1fr}main{padding:23px 18px}.model-grid{grid-template-columns:1fr 1fr}}@media(max-width:620px){header{align-items:flex-start;flex-direction:column}.controls{justify-content:flex-start}.models{grid-template-columns:1fr}.section-head{flex-direction:column;gap:12px}.stat-value{font-size:22px}h1{font-size:25px}.model-grid{grid-template-columns:repeat(3,1fr)}footer{flex-direction:column;gap:4px}}
+
+.test-panel{padding:18px 20px;margin-bottom:20px}
+.test-panel .section-head{margin-bottom:4px;align-items:center}
+.test-pass{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.test-wrap{overflow-x:auto}
+.test-table{margin-top:7px;font-variant-numeric:tabular-nums}
+.test-table td,.test-table th{padding:7px 10px;white-space:nowrap}
+.test-table td:first-child,.test-table th:first-child{padding-left:0}
+.test-table td:last-child,.test-table th:last-child{padding-right:0}
+.test-table th:nth-last-child(-n+2),.test-table td:nth-last-child(-n+2){text-align:right}
+.test-table tr[data-state="running"] td{background:#f0f8f5}
+.test-table tr[data-state="running"] td:first-child{box-shadow:inset 3px 0 #218569;padding-left:9px}
+.test-table .test-value{font-weight:650}
+.test-table .test-status{font-size:12px;color:var(--muted)}
+.test-table tr[data-state="running"] .test-status{color:#137053;font-weight:650}
+.test-note{margin:8px 0 0;color:var(--muted);font-size:12px}
+.model:only-child{grid-column:1 / -1}
+.queue-panel{padding:14px 20px;margin-bottom:18px}.queue-panel h2{font-size:14px}.queue-panel ol{margin:8px 0 0;padding:0;list-style:none;display:flex;gap:8px 20px;flex-wrap:wrap}.queue-panel li{display:flex;align-items:center;gap:6px}.queue-position{color:var(--muted);font-variant-numeric:tabular-nums}
+.curve-controls{margin-top:12px;max-width:760px;overflow-x:auto}.curve-controls table{margin:0}.curve-controls td,.curve-controls th{padding:4px 10px;text-align:center}.curve-controls th:first-child{text-align:left}.curve-controls input{accent-color:var(--blue);width:16px;height:16px}.curve-controls tr[data-queued=true]{color:var(--muted)}.latent-chart{height:220px}.latent-chart text{font-variant-numeric:tabular-nums}
+.aux-metrics{margin-top:14px;padding-top:12px;border-top:1px solid #edf0f5}
+.reference{margin-top:13px;padding-top:12px;border-top:1px solid var(--line)}
+.reference table{width:auto;min-width:300px;margin-top:4px}
+.reference td,.reference th{padding:4px 20px 4px 0}
+#testComparison:empty{display:none}
+@media(max-width:620px){.test-panel{padding:14px 12px}.test-panel .section-head{align-items:start}.test-table td,.test-table th{padding:6px 4px;font-size:11px}.test-table td:nth-child(4),.test-table th:nth-child(4){white-space:normal}}
+</style></head><body><main><header><div><div class="eyebrow">Two-Room world model</div><h1>Training monitor</h1><div class="subtle" id="subtitle">Connecting to the local experiment…</div></div><div class="controls"><span id="statusBadge" class="badge">Preparing</span><button id="pause" disabled>Pause safely</button><button id="resume" class="primary" disabled>Resume</button></div></header>
+<div id="notice" class="notice" role="status"></div><div class="stats"><div class="card stat"><div class="stat-label">Current phase</div><div class="stat-value" id="phase">Preparing</div><div class="stat-detail" id="phaseDetail">No active run yet</div></div><div class="card stat"><div class="stat-label">Training throughput</div><div class="stat-value" id="throughput">—</div><div class="stat-detail" id="throughputDetail">Windows per second</div></div><div class="card stat"><div class="stat-label">GPU utilization</div><div class="stat-value" id="gpuUtil">—</div><div class="meter"><span id="gpuMeter" style="width:0%"></span></div><div class="stat-detail" id="gpuName">Waiting for GPU telemetry</div></div><div class="card stat"><div class="stat-label">GPU memory</div><div class="stat-value" id="gpuMemory">—</div><div class="stat-detail" id="gpuMemoryDetail">Allocated device memory</div></div></div>
+<section class="card test-panel" aria-labelledby="testHeading">
+<div class="section-head"><div><h2 id="testHeading">Held-out test metrics</h2><div class="subtle" id="testCoverage"></div></div><span class="test-pass" id="testPass"></span></div>
+<div class="test-wrap"><table class="test-table"><thead><tr><th scope="col">Model</th><th scope="col">Precision</th><th scope="col">Status</th><th scope="col">Windows tested</th><th scope="col">Next-embedding MSE</th></tr></thead><tbody id="testRows"></tbody></table></div>
+<p class="test-note" id="planningProgress" hidden></p><p class="test-note" id="testProgress"></p><p class="test-note" id="testComparison"></p>
+<div class="reference" id="referenceScores" hidden><strong>Earlier runs on the same test windows</strong><div class="subtle" id="referenceExperiment"></div><table><thead><tr><th>Model</th><th>BF16 MSE</th><th>FP32 MSE</th></tr></thead><tbody id="referenceRows"></tbody></table></div>
+</section>
+<section id="queuePanel" class="card queue-panel" hidden><h2>Training queue</h2><ol id="queueRows"></ol></section>
+<div id="models" class="models"></div><section class="card chart-card"><div class="section-head"><div><h2>Next-embedding loss</h2><div class="subtle">Training MSE · lower is better within each learned latent space</div></div><div class="legend" id="chartLegend"></div></div><div id="chart"></div><div id="curveControls" class="curve-controls"></div><div class="options"><label><input id="showTotal" type="checkbox"> All total losses (dashed)</label><label><input id="showAux" type="checkbox"> All auxiliary losses (dotted)</label><label><input id="logScale" type="checkbox"> Log scale</label><label id="matchStepsLabel" style="display:none"><input id="matchSteps" type="checkbox"> Through current step</label></div><div class="chart-note" id="chartReadout" hidden></div><div class="chart-note" id="chartNote">Training metrics update as they are written.</div></section>
+<section class="card chart-card" id="latentPanel" hidden><div class="section-head"><div><h2>Encoder variation across examples</h2><div class="subtle">RMS standard deviation across training examples at the same time and embedding coordinate.</div></div><div class="legend" id="latentLatest"></div></div><div id="latentChart"></div><div class="chart-note">Zero means that every example had the same encoded values at each time in that batch.</div></section>
+<div><section class="card panel"><div class="section-head" style="margin-bottom:0"><h2>Run activity</h2><span class="subtle" id="updated"></span></div><p id="activity">Waiting for progress.</p><details><summary>Latest log output</summary><pre id="log">No output yet.</pre></details></section></div><footer><span id="experimentLabel">Local monitor · 127.0.0.1:8765</span><span>Updates every 2 seconds · GPU telemetry every 5 seconds</span></footer></main>
+<script>
+let current=null,token="",controlBusy=false;const $=id=>document.getElementById(id);
+const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num=v=>typeof v==="number"&&Number.isFinite(v);const count=v=>v!==null&&v!==undefined&&num(Number(v))?Number(v).toLocaleString():"—";
+function loss(v){if(!num(v))return "—";if(v===0)return "0";return Math.abs(v)<.0001?v.toExponential(3):v.toFixed(6).replace(/0+$/,"").replace(/\.$/,"");}
+function duration(v){if(!num(v))return "—";v=Math.max(0,Math.round(v));const h=Math.floor(v/3600),m=Math.floor(v%3600/60),s=v%60;return h?h+"h "+m+"m":m?m+"m "+s+"s":s+"s";}
+function title(v){return String(v||"preparing").replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase());}
+const modelLabels={sigreg:"SIGReg",action_predictor:"Action predictor",combined:"SIGReg 0.09 + action 0.09",mse_only:"MSE only",combined_s06:"SIGReg 0.06 + action 0.09",combined_s03:"SIGReg 0.03 + action 0.09",combined_a100:"SIGReg 0.09 + action 1.0",action_w50:"Action 50 (no SIGReg)",delta_l0_s09:"LDAD 0 + SIGReg 0.09",delta_l50_s09:"LDAD 50 + SIGReg 0.09",delta_l50_s0:"LDAD 50 + SIGReg 0"};
+const combinedModels=new Set(["combined","combined_s06","combined_s03","combined_a100"]);
+const deltaModels=new Set(["delta_l0_s09","delta_l50_s09","delta_l50_s0"]);
+const singleModels=new Set([...combinedModels,...deltaModels,"mse_only","action_w50"]);
+const spreadModels=new Set([...deltaModels,"mse_only","combined_a100","action_w50"]);
+const modelColors={sigreg:"#2563eb",action_predictor:"#dc7633",combined:"#067769",mse_only:"#8851ad",combined_s06:"#b24768",combined_s03:"#857013",combined_a100:"#374151",action_w50:"#087ea1",delta_l0_s09:"#524b9d",delta_l50_s09:"#9f4322",delta_l50_s0:"#257631"};
+function phaseLabel(p){
+  const match=/^(train|audit)_(.+)$/.exec(p||"");
+  if(match&&modelLabels[match[2]])return (match[1]==="train"?"Train ":"Audit ")+modelLabels[match[2]];
+  return ({evaluate_next_embedding:"Evaluate test set",plan_delta:"Evaluate planning",evaluate_planning:"Evaluate planning",complete:"Complete",starting:"Starting"})[p]||title(p);
+}
+function notice(message){$("notice").textContent=message||"";$("notice").style.display=message?"block":"none";}
+function modelCard(m){const p=m.progress||{},steps=Number(p.optimizer_steps)||0,total=Number(p.expected_steps)||0,percent=total?100*steps/total:0,color=modelColors[m.key]||"#2563eb",cp=m.checkpoint||{},state=m.state==="pending"?"waiting":m.state;
+const extraFields=combinedModels.has(m.key)?[["SIGReg loss","sigreg_loss"],["Action prediction loss","action_loss"],["Total loss","loss"]]:
+  m.key==="action_w50"?[["Action MSE (unweighted)","action_loss"],["Total loss","loss"]]:
+  deltaModels.has(m.key)?[[m.key==="delta_l0_s09"?"LDAD MSE (diagnostic only)":"LDAD MSE (unweighted)","ldad_loss"],
+    ...(m.key==="delta_l50_s0"?[]:[["SIGReg loss","sigreg_loss"]]),["Total loss","loss"]]:[];
+const epoch=p.epochs>1?"Epoch "+count(p.current_epoch||1)+" / "+count(p.epochs)+" · ":"";
+const extra=extraFields.length?'<div class="model-grid aux-metrics">'+extraFields.map(([label,key])=>'<div><label>'+label+'</label><strong>'+loss(m.last_losses?.[key])+'</strong></div>').join("")+'</div>':"";
+return '<article class="card model"><div class="model-head"><div class="model-title"><i class="dot" style="background:'+color+'"></i><h2>'+esc(m.label)+'</h2></div><span class="badge '+esc(state)+'">'+esc(title(state))+'</span></div><div class="model-name">'+esc(m.name||"Fresh model · waiting to start")+'</div><div class="model-progress"><span class="big">'+percent.toFixed(1)+'<span style="font-size:17px;color:#8b96a6">%</span></span><span class="step-info">'+epoch+count(steps)+' / '+count(total)+' optimizer steps</span></div><div class="progress"><div style="width:'+Math.min(100,Math.max(0,percent))+'%;background:'+color+'"></div></div><div class="model-grid"><div><label>Next-embedding MSE</label><strong>'+loss(m.last_pred_loss)+'</strong></div><div><label>Elapsed</label><strong>'+duration(p.elapsed_seconds)+'</strong></div><div><label>Estimated remaining</label><strong>'+(state==="paused"?"Paused":state==="complete"?"Done":m.active?(num(m.recent_eta_seconds)?duration(m.recent_eta_seconds):"Warming up"):"—")+'</strong></div></div>'+extra+'<div class="foot"><span>'+count(Number(p.windows_seen)||0)+' / '+count(p.expected_windows)+' windows</span><span>'+(cp.available?'Checkpoint '+duration(cp.age_seconds)+' ago':'No checkpoint yet')+'</span></div></article>';}
+let logScaleChosen=false,comparisonChart=false,inspectStep=null;
+const curveFields={sigreg:["pred_loss","loss","sigreg_loss"],action_predictor:["pred_loss","loss","action_loss"],
+  mse_only:["pred_loss","loss"],action_w50:["pred_loss","loss","action_loss"]};
+for(const key of combinedModels)curveFields[key]=["pred_loss","loss","sigreg_loss","action_loss"];
+for(const key of deltaModels)curveFields[key]=["pred_loss","loss",...(key==="delta_l50_s0"?[]:["sigreg_loss"]),"ldad_loss"];
+const fieldLabels={pred_loss:"prediction MSE",loss:"total loss",sigreg_loss:"SIGReg loss",action_loss:"encoded action MSE",ldad_loss:"raw LDAD MSE"};
+const isAux=f=>["action_loss","sigreg_loss","ldad_loss"].includes(f);
+const preferenceKey="lewm-training-chart-v1";
+let choices={};
+try{const saved=JSON.parse(localStorage.getItem(preferenceKey)||"{}");if(saved&&typeof saved==="object"&&!Array.isArray(saved))choices=saved;}catch(_){}
+const isVisible=(model,field)=>typeof choices[model+"."+field]==="boolean"?choices[model+"."+field]:field==="pred_loss";
+function persistChoices(){try{localStorage.setItem(preferenceKey,JSON.stringify(choices));}catch(_){}}
+if(typeof choices.logScale==="boolean"){logScaleChosen=true;$("logScale").checked=choices.logScale;}
+if(typeof choices.matchSteps==="boolean")$("matchSteps").checked=choices.matchSteps;
+function syncCurveControls(models){
+  const panel=$("curveControls"),signature=models.map(m=>m.key).join("|");
+  if(panel.dataset.models!==signature){
+    panel.dataset.models=signature;
+    const fields=Object.keys(fieldLabels).filter(f=>f!=="ldad_loss"||models.some(m=>deltaModels.has(m.key)));
+    panel.innerHTML='<table aria-label="Visible training curves"><thead><tr><th scope="col">Visible curves</th>'+
+      ["Prediction MSE","Total","SIGReg","Encoded action","Raw LDAD"].slice(0,fields.length).map(v=>'<th scope="col">'+v+'</th>').join("")+'</tr></thead><tbody>'+
+      models.map(m=>'<tr><th scope="row">'+esc(m.label)+'</th>'+fields.map(field=>(curveFields[m.key]||[]).includes(field)?
+        '<td><input type="checkbox" data-model="'+esc(m.key)+'" data-field="'+field+'" aria-label="'+esc(m.label+" "+fieldLabels[field])+'"></td>':'<td>—</td>').join("")+'</tr>').join("")+'</tbody></table>';
+  }
+  const inputs=[...panel.querySelectorAll("input[data-field]")];
+  for(const box of inputs)box.checked=isVisible(box.dataset.model,box.dataset.field);
+  for(const [id,accept] of [["showTotal",f=>f==="loss"],["showAux",isAux]]){
+    const boxes=inputs.filter(box=>accept(box.dataset.field)),n=boxes.filter(box=>box.checked).length;
+    const shortcut=$(id);shortcut.disabled=!boxes.length;shortcut.checked=boxes.length>0&&n===boxes.length;shortcut.indeterminate=n>0&&n<boxes.length;
+  }
+}
+$("curveControls").addEventListener("change",event=>{
+  const box=event.target;if(!box.dataset.model||!box.dataset.field)return;
+  choices[box.dataset.model+"."+box.dataset.field]=box.checked;persistChoices();drawChart();
+});
+for(const id of ["showTotal","showAux"])$(id).addEventListener("change",event=>{
+  for(const box of $("curveControls").querySelectorAll("input[data-field]")){
+    const f=box.dataset.field;
+    if(id==="showTotal"?f==="loss":isAux(f))choices[box.dataset.model+"."+f]=event.target.checked;
+  }
+  persistChoices();drawChart();
+});
+// Retain the first, lowest, highest and last point in each horizontal pixel.
+function visiblePoints(points,xmax,width){
+  if(points.length<=width*2)return points;
+  const result=[];let bucket=-1,first,low,high,last;
+  const flush=()=>{if(first)result.push(...[...new Set([first,low,high,last])].sort((a,b)=>a[0]-b[0]));};
+  for(const p of points){const next=Math.floor(p[0]/xmax*width);
+    if(next!==bucket){flush();bucket=next;first=low=high=p;}
+    if(p[1]<low[1])low=p;if(p[1]>high[1])high=p;last=p;}
+  flush();return result;
+}
+function drawChart(){
+  if(!current)return;
+  const active=current.models||[],refs=current.reference_training_models||[],queued=current.queued_training_models||[];
+  const comparing=refs.length>0, live=active.length===1?active[0]:null;
+  if(comparing!==comparisonChart&&!logScaleChosen)$("logScale").checked=comparing;
+  comparisonChart=comparing;
+  $("matchStepsLabel").style.display=comparing?"":"none";
+  const log=$("logScale").checked, models=[...refs,...active,...queued],livePoints=live?.metrics?.points||[];
+  const currentStep=livePoints.length?livePoints[livePoints.length-1].step:0;
+  const limit=comparing&&$("matchSteps").checked?currentStep:Infinity;
+  const label=m=>m.label+(queued.includes(m)?" · Queue "+m.queue_position+" · "+title(m.state||"queued"):refs.includes(m)?" · prior run":comparing?" · current run":"");
+  $("chartLegend").innerHTML=models.map(m=>'<span><i class="dot" style="background:'+modelColors[m.key]+'"></i>'+esc(label(m))+'</span>').join("");
+  syncCurveControls(models);
+  const series=[];let xmax=1,ymin=log?Infinity:0,ymax=-Infinity;
+  for(const m of models){
+    const fields=(curveFields[m.key]||[]).filter(field=>isVisible(m.key,field));
+    for(const field of fields){const data=[];
+      for(const p of m.metrics?.points||[]){if(p.step>limit)break;
+        if(!num(p[field])||(log&&p[field]<=0))continue;
+        const v=log?Math.log10(p[field]):p[field];data.push([p.step,v]);
+        xmax=Math.max(xmax,p.step);ymin=Math.min(ymin,v);ymax=Math.max(ymax,v);
+      }
+      if(data.length)series.push({m,field,data});
+    }
+  }
+  const sampled=models.some(m=>(m.metrics?.sample_stride||1)>1);
+  const historical=live&&deltaModels.has(live.key)&&refs.some(m=>m.epochs===1);
+  const note=comparing?((historical?"Earlier one-epoch runs share the first epoch’s window order. ":"Same training windows and optimizer-step axis. ")+
+    (limit<Infinity?"All curves stop at the current run’s latest logged step ("+count(currentStep)+").":
+    "Prior runs show their full history; the current curve ends at step "+count(currentStep)+"."))
+    :models.some(m=>m.metrics?.truncated)?"Showing recent history. The original CSV files retain the full records.":"Training metrics update as they are written.";
+  $("chartNote").textContent=note+(sampled?" Long curves show sampled optimizer steps across their full history.":"");
+  if(!series.length){$("chartReadout").hidden=true;$("chart").innerHTML='<div class="chart-empty">No logged points for the selected curves and step range.</div>';return;}
+  const W=1100,H=280,L=65,R=24,T=16,B=38;
+  if(ymax<=ymin)ymax=ymin+1;
+  const pad=(ymax-ymin)*.06;ymax+=pad;if(log)ymin-=pad;
+  const x=v=>L+v/xmax*(W-L-R),y=v=>T+(ymax-v)/(ymax-ymin)*(H-T-B);
+  let svg='<svg class="chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Training loss by optimizer step">';
+  for(let i=0;i<=4;i++){const v=ymin+(ymax-ymin)*i/4,yy=y(v);
+    svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#e8edf3"/><text x="'+(L-10)+'" y="'+(yy+4)+'" text-anchor="end" fill="#6c788a" font-size="10">'+(log?Math.pow(10,v).toExponential(1):loss(v))+'</text>';
+  }
+  const n=Math.min(4,xmax);for(let i=0;i<=n;i++){const step=Math.round(i*xmax/n);
+    svg+='<text x="'+x(step)+'" y="'+(H-14)+'" text-anchor="middle" fill="#6c788a" font-size="10">'+count(step)+'</text>';}
+  if(comparing&&currentStep>0&&currentStep<xmax)
+    svg+='<line x1="'+x(currentStep)+'" x2="'+x(currentStep)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="'+(modelColors[live?.key]||"#69788b")+'" opacity=".38" stroke-dasharray="4 5"><title>Current run: step '+count(currentStep)+'</title></line>';
+  const dashes={loss:"7 5",aux_loss:"2 5",sigreg_loss:"2 5",action_loss:"2 3 7 3",ldad_loss:"3 3"};
+  const fieldNames={pred_loss:"Next-embedding MSE",loss:"Total loss",aux_loss:"Auxiliary loss",sigreg_loss:"SIGReg loss",action_loss:"Encoded action prediction loss",ldad_loss:"Raw LDAD MSE"};
+  for(const {m,field,data} of series){
+    const pts=visiblePoints(data,xmax,W-L-R),last=data[data.length-1];
+    const path=pts.map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+","+y(p[1]).toFixed(2)).join(" ");
+    const color=modelColors[m.key]||"#2563eb";
+    svg+='<path data-model="'+esc(m.key)+'" data-metric="'+field+'" data-last-step="'+last[0]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="'+(field==="pred_loss"?1.9:1.3)+'" stroke-linejoin="round"'+(dashes[field]?' stroke-dasharray="'+dashes[field]+'"':"")+'><title>'+esc(label(m))+' · '+fieldNames[field]+'</title></path>';
+    if(data.length===1||(comparing&&m===live&&field==="pred_loss"))
+      svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3.5" fill="'+color+'" stroke="white"><title>Step '+count(last[0])+' · '+loss(log?Math.pow(10,last[1]):last[1])+'</title></circle>';
+  }
+  $("chart").innerHTML=svg+'<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">Optimizer step</text></svg>';
+  const chart=$("chart").querySelector("svg");
+  function readStep(step){
+    const readout=$("chartReadout");
+    const k=Math.min(Math.max(1,step||1),xmax);
+    if(step==null){readout.hidden=true;return;}
+    const values=series.map(({m,field})=>{
+      const pts=m.metrics?.points||[];let lo=0,hi=pts.length;
+      while(lo<hi){const mid=(lo+hi)>>>1;if(pts[mid].step<k)lo=mid+1;else hi=mid;}
+      const row=pts[lo];
+      const value=row?.step===k&&num(row[field])?loss(row[field]):"—";
+      return (modelLabels[m.key]||m.label)+" "+fieldLabels[field]+": "+value;
+    });
+    readout.hidden=false;readout.textContent="Step "+count(k)+" · "+values.join("   |   ");
+  }
+  readStep(inspectStep);
+  $("chart").onpointermove=event=>{
+    const matrix=chart.getScreenCTM();if(!matrix)return;
+    const pointer=new DOMPoint(event.clientX,event.clientY).matrixTransform(matrix.inverse());
+    inspectStep=pointer.x<L||pointer.x>W-R?null:Math.round((pointer.x-L)/(W-L-R)*xmax);
+    readStep(inspectStep);
+  };
+  $("chart").onpointerleave=()=>{inspectStep=null;readStep(null);};
+
+}
+$("logScale").addEventListener("change",()=>{logScaleChosen=true;choices.logScale=$("logScale").checked;persistChoices();drawChart();});
+$("matchSteps").addEventListener("change",()=>{choices.matchSteps=$("matchSteps").checked;persistChoices();drawChart();if(current)drawLatentChart(current);});
+function drawLatentChart(d){
+  const active=d.models||[],refs=d.reference_training_models||[],queued=d.queued_training_models||[];
+  const hasSpread=m=>m.metrics?.points?.some(p=>num(p.latent_cross_example_rms_std)&&p.latent_cross_example_count>1);
+  const models=[...refs.filter(hasSpread),...[...active,...queued].filter(m=>spreadModels.has(m.key)||hasSpread(m))];
+  $("latentPanel").hidden=!models.length;if(!models.length)return;
+  const live=active.length===1?active[0]:null,livePoints=live?.metrics?.points||[];
+  const limit=live&&refs.length&&$("matchSteps").checked?(livePoints.at(-1)?.step||0):Infinity;
+  const curves=models.map(model=>({model,points:(model.metrics?.points||[])
+    .filter(p=>p.step<=limit&&num(p.latent_cross_example_rms_std)&&p.latent_cross_example_rms_std>=0&&p.latent_cross_example_count>1)
+    .map(p=>[p.step,p.latent_cross_example_rms_std])}));
+  $("latentLatest").innerHTML=curves.map(({model,points})=>{
+    const last=points.at(-1),value=last?"Step "+count(last[0])+" · RMS "+loss(last[1]):"Awaiting data";
+    return '<span><i class="dot" style="background:'+modelColors[model.key]+'"></i>'+esc(model.label||modelLabels[model.key])+" · "+value+'</span>';
+  }).join("");
+  if(!curves.some(curve=>curve.points.length)){
+    $("latentChart").innerHTML='<div class="chart-empty">Waiting for the first recorded batch with at least two examples.</div>';
+    return;
+  }
+  const W=1100,H=220,L=70,R=24,T=14,B=36,xmax=Math.max(1,...curves.map(c=>c.points.at(-1)?.[0]||0));
+  const ymax=curves.reduce((max,c)=>c.points.reduce((m,p)=>Math.max(m,p[1]),max),0)*1.06||1;
+  const x=v=>L+v/xmax*(W-L-R),y=v=>T+(1-v/ymax)*(H-T-B);
+  let svg='<svg class="chart latent-chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="RMS cross-example latent standard deviation by optimizer step">';
+  for(let i=0;i<=4;i++){
+    const v=ymax*i/4,yy=y(v);
+    svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#e8edf3"/><text x="'+(L-8)+'" y="'+(yy+4)+'" text-anchor="end" fill="#6c788a" font-size="10">'+loss(v)+'</text>';
+  }
+  const ticks=Math.min(4,xmax);for(let i=0;i<=ticks;i++){
+    const k=Math.round(i*xmax/ticks);svg+='<text x="'+x(k)+'" y="'+(H-13)+'" text-anchor="middle" fill="#6c788a" font-size="10">'+count(k)+'</text>';
+  }
+  for(const {model,points} of curves){
+    if(!points.length)continue;
+    const last=points.at(-1),color=modelColors[model.key];
+    const path=visiblePoints(points,xmax,W-L-R).map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+","+y(p[1]).toFixed(2)).join(" ");
+    svg+='<path data-model="'+esc(model.key)+'" data-metric="latent_cross_example_rms_std" data-last-step="'+last[0]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1.9"><title>'+esc(model.label||modelLabels[model.key])+'</title></path>';
+    svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3" fill="'+color+'"/>';
+  }
+  svg+='<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">Optimizer step</text></svg>';
+  $("latentChart").innerHTML=svg;
+}
+function renderTest(d) {
+  const rows = d.evaluation_phases || [];
+  const test = d.counts?.test || {};
+  const labels = modelLabels;
+  const states = {waiting: "Queued", running: "Live", complete: "Final", paused: "Paused", interrupted: "Interrupted"};
+  const active = rows.find(row => row.state === "running");
+  const finished = rows.filter(row => row.state === "complete").length;
+  $("testCoverage").textContent = num(test.episodes) ? count(test.episodes) + " held-out episodes · " + count(test.windows) + " windows per pass" : "";
+  $("testPass").textContent = rows.length ? finished + " of " + rows.length + " passes complete" : "";
+  $("testRows").innerHTML = rows.map(row => {
+    const state = states[row.state] || "Queued";
+    const coverage = row.state === "waiting" ? "—" : count(row.completed_windows) + " / " + count(row.total_windows);
+    const mse = num(row.mse) ? row.mse.toPrecision(6) : "—";
+    return '<tr data-state="' + esc(row.state) + '"><td>' + esc(labels[row.model] || row.model) + '</td><td>' +
+      (row.precision === "bf16_mixed" ? "BF16" : "FP32") + '</td><td class="test-status">' + state +
+      '</td><td>' + coverage + '</td><td class="test-value">' + mse + '</td></tr>';
+  }).join("");
+  let note = "";
+  if (active) {
+    const percent = active.total_windows ? (100*active.completed_windows/active.total_windows).toFixed(1) + "% of this pass" : "";
+    const eta = num(active.eta_seconds) ? duration(active.eta_seconds) + " remaining" : "";
+    note = ["Live MSE averages the windows tested so far.", percent, eta].filter(Boolean).join(" · ");
+  } else if (rows.some(row => ["paused", "interrupted"].includes(row.state))) {
+    note = "Partial scores cover only the windows tested before the pass stopped.";
+  } else if (!finished) {
+    note = "Scores appear as the evaluator processes the held-out windows.";
+  }
+  $("testProgress").textContent = note;
+  const planning=d.planning||{},planned=Number(planning.evaluation_trials||planning.expected_trials||0);
+  $("planningProgress").hidden=!planned;
+  if(planned){
+    const completed=planning.evaluation_trials||planning.completed_trials||0;
+    const rate=planning.mean_success_percent??planning.success_rate_percent;
+    $("planningProgress").textContent="Planning · "+count(completed)+" / "+count(planned)+" trials"+
+      (num(rate)?" · "+rate.toFixed(1)+"% reached the goal":"")+(planning.passed?" · final":"");
+  }
+  renderReferenceScores(d.reference_evaluation);
+  if (rows.some(row => singleModels.has(row.model))) {
+    $("testComparison").textContent = "";
+    return;
+  }
+  const comparison = d.evaluation?.comparisons?.bf16_mixed;
+  const bf16 = rows.filter(row => row.precision === "bf16_mixed" && row.state === "complete");
+  let reduction = comparison?.original_validation_arithmetic?.action_relative_reduction_percent;
+  if (!num(reduction)) {
+    const original = bf16.find(row => row.model === "sigreg")?.mse;
+    const action = bf16.find(row => row.model === "action_predictor")?.mse;
+    if (num(original) && original > 0 && num(action)) reduction = 100*(original-action)/original;
+  }
+  let summary = num(reduction) ? "BF16 · Action predictor MSE is " + Math.abs(reduction).toFixed(2) +
+    "% " + (reduction >= 0 ? "lower" : "higher") + " than SIGReg." : "";
+  const interval = comparison?.native_window_metric?.paired_episode_bootstrap_reduction_percent_95pct_ci;
+  if (summary && Array.isArray(interval) && interval.length === 2 && interval.every(num)) {
+    summary += " 95% episode-bootstrap interval for the reduction: " + interval.map(n => n.toFixed(2)+"%").join(" to ") + ".";
+  }
+  $("testComparison").textContent = summary;
+}
+function renderReferenceScores(reference) {
+  const rows = reference?.rows || [];
+  $("referenceScores").hidden = !rows.length;
+  if (!rows.length) return;
+  $("referenceExperiment").textContent = reference.experiment;
+  $("referenceRows").innerHTML = [...new Set(rows.map(row=>row.model))].map(model => {
+    const cells = ["bf16_mixed","fp32"].map(precision => {
+      const mse = rows.find(row => row.model === model && row.precision === precision)?.mse;
+      return "<td>"+(num(mse) ? mse.toPrecision(6) : "—")+"</td>";
+    }).join("");
+    return "<tr><td>"+modelLabels[model]+"</td>"+cells+"</tr>";
+  }).join("");
+}
+function positionTestPanel(d) {
+  const panel = document.querySelector(".test-panel");
+  const model = d.models?.length === 1 ? d.models[0].key : null;
+  const training = singleModels.has(model) && ["starting","train_"+model,"audit_"+model].includes(d.status?.phase);
+  if (training && $("latentPanel").nextElementSibling !== panel) $("latentPanel").after(panel);
+  if (!training && panel.nextElementSibling !== $("models")) $("models").before(panel);
+}
+function renderQueue(rows){
+  $("queuePanel").hidden=!rows.length;
+  $("queueRows").innerHTML=rows.map(m=>'<li value="'+Number(m.queue_position)+'"><span class="queue-position">'+Number(m.queue_position)+'.</span><i class="dot" style="background:'+modelColors[m.key]+'"></i>'+esc(m.label)+'</li>').join("");
+}
+function render(d){renderQueue(d.queued_training_models||[]);positionTestPanel(d);current=d;token=d.control_token||token;const status=d.status||{},state=status.status||"preparing",pending=(d.control||{}).request==="pause"&&state==="running",job=d.control_job||{},resuming=state==="paused"&&(d.control||{}).request==="run"&&job.action==="resume"&&(job.status==="running"||job.status==="accepted");$("statusBadge").className="badge "+state;$("statusBadge").textContent=pending?"Pause requested":title(state);$("subtitle").textContent=d.available?(d.label||"Active experiment")+" · Batch "+(d.batch_size||"—")+" · "+count(((d.counts||{}).train||{}).episodes)+" training episodes":d.message||"Preparing the active experiment.";
+$("pause").disabled=!d.controls_available||state!=="running"||pending||controlBusy||job.status==="running";$("resume").disabled=!d.controls_available||state!=="paused"||resuming||controlBusy||job.status==="running";$("resume").textContent=resuming?"Resuming…":"Resume";$("pause").textContent=pending?"Pause requested":"Pause safely";
+let message=resuming?"Resume requested. Waiting for the training process to restore its checkpoint.":pending?"Pause requested. Training is still running while it finishes the current work and saves a checkpoint.":state==="paused"?"Paused. The saved training state will be used when you resume.":state==="failed"?(status.error||"The run stopped with an error. See the activity log."):"";if(job.status==="failed")message="Control request failed: "+(job.error||JSON.stringify(job.response||{}));if(d.collector_error)message="Progress could not be refreshed: "+d.collector_error;notice(message);
+$("phase").textContent=phaseLabel(status.phase);$("phaseDetail").textContent=state==="paused"?"Saved state is paused":status.phase_started_utc?"Phase started "+new Date(status.phase_started_utc).toLocaleTimeString():"Waiting for the pipeline";const active=(d.models||[]).find(m=>m.active),rate=state==="paused"?{windows_per_second:0,steps_per_second:0,basis:"paused"}:state==="running"&&active?(active.throughput||{}):{};$("throughput").textContent=num(rate.windows_per_second)?rate.windows_per_second.toFixed(1)+" /s":"—";$("throughputDetail").textContent=state==="paused"?"Paused · no optimizer updates":num(rate.steps_per_second)?rate.steps_per_second.toFixed(2)+" steps/s · "+rate.basis+" windows/s":"Training windows per second";
+const gpu=d.gpu||{};$("gpuUtil").textContent=num(gpu.utilization)?Math.round(gpu.utilization)+"%":"—";$("gpuMeter").style.width=(gpu.utilization||0)+"%";$("gpuName").textContent=gpu.name||"GPU telemetry unavailable";$("gpuMemory").textContent=num(gpu.memory_used_mib)?(gpu.memory_used_mib/1024).toFixed(1)+" GB":"—";$("gpuMemoryDetail").textContent=num(gpu.memory_total_mib)?"of "+(gpu.memory_total_mib/1024).toFixed(1)+" GB"+(num(gpu.power_watts)?" · "+Math.round(gpu.power_watts)+" W":""):"Allocated device memory";
+$("models").innerHTML=(d.models||[]).map(modelCard).join("");$("updated").textContent=status.updated_utc?"Report "+new Date(status.updated_utc).toLocaleTimeString():"";$("activity").textContent=status.error||(pending?"Saving progress before pausing.":state==="complete"?((d.models||[]).length===1?"Training and held-out evaluation are complete.":"Both training runs and the held-out comparison are complete."):state==="paused"?"Resume when you are ready to continue.":phaseLabel(status.phase)+".");$("log").textContent=d.log_tail||"No log output yet.";$("experimentLabel").textContent=d.experiment_path||"Local monitor · 127.0.0.1:8765";renderTest(d);drawChart();drawLatentChart(d);}
+async function poll(){
+  try{
+    const previous=current?.reference_training_token;
+    const url="/api/status"+(previous?"?reference_token="+encodeURIComponent(previous):"");
+    const r=await fetch(url,{cache:"no-store"});if(!r.ok)throw Error(r.status);
+    const data=await r.json();
+    if(data.reference_training_omitted===true&&previous&&data.reference_training_token===previous&&Array.isArray(current.reference_training_models))
+      data.reference_training_models=current.reference_training_models;
+    render(data);
+  }catch(e){notice("The local dashboard connection is unavailable. Retrying…");}
+  finally{setTimeout(poll,2000);}
+}
+async function control(action){controlBusy=true;$("pause").disabled=true;$("resume").disabled=true;notice(action==="pause"?"Sending pause request…":"Starting resume…");try{const r=await fetch("/api/control/"+action,{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:"{}"});const response=await r.json();if(!r.ok)throw Error(response.error||"Request failed");notice(response.message);}catch(e){notice(e.message);}finally{controlBusy=false;}}
+$("pause").addEventListener("click",()=>control("pause"));$("resume").addEventListener("click",()=>control("resume"));poll();
+</script></body></html>
