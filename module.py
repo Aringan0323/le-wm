@@ -283,3 +283,47 @@ class ARPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x, c)
         return x
+
+
+class ActionPredictor(nn.Module):
+    """Predict encoded actions from latent changes, without action inputs."""
+
+    def __init__(
+        self,
+        *,
+        num_frames=3,
+        depth=6,
+        heads=16,
+        mlp_dim=2048,
+        input_dim=192,
+        hidden_dim=192,
+        output_dim=None,
+        dim_head=64,
+        dropout=0.1,
+        emb_dropout=0.0,
+    ):
+        super().__init__()
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames, input_dim))
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = Transformer(
+            input_dim,
+            hidden_dim,
+            output_dim or input_dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            block_class=Block,
+        )
+
+    def forward(self, delta):
+        """Map (B, T, D) predicted state changes to encoded action estimates.
+
+        Causal attention prevents later changes from influencing earlier outputs.
+        The caller supplies only ``pred_emb - ctx_emb``, never actual actions.
+        """
+        T = delta.size(1)
+        x = delta + self.pos_embedding[:, :T]
+        x = self.dropout(x)
+        return self.transformer(x)

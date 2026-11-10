@@ -1,0 +1,7 @@
+defaults:
+  - lewm_combined
+  - _self_
+
+loss:
+  sigreg:
+    weight: 0.06

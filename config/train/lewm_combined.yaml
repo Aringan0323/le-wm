@@ -1,0 +1,12 @@
+# Keep the action-prediction architecture and regularize the encoded observations.
+defaults:
+  - lewm
+  - override model: lewm_action
+  - _self_
+
+loss:
+  type: combined
+  sigreg:
+    weight: 0.09
+  action_prediction:
+    weight: 0.09

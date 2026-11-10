@@ -1,0 +1,8 @@
+defaults:
+  - lewm
+  - _self_
+
+loss:
+  type: mse_only
+  sigreg: null
+  action_prediction: null

@@ -1,0 +1,11 @@
+# Action prediction replaces SIGReg; the baseline lewm configuration remains available.
+defaults:
+  - lewm
+  - override model: lewm_action
+  - _self_
+
+loss:
+  type: action_prediction
+  sigreg: null
+  action_prediction:
+    weight: 0.09

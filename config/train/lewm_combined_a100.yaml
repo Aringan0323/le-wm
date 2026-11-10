@@ -1,0 +1,9 @@
+defaults:
+  - lewm_combined
+  - _self_
+
+loss:
+  action_prediction:
+    weight: 1.0
+
+track_cross_example_latent_spread: true
