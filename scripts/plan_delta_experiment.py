@@ -22,12 +22,13 @@ class PlanningProtocol:
     selection_seed: int = 20261110
     solver_seeds: tuple = (42, 43, 44)
     trajectories: int = 500
-    goal_offset: int = 100
-    budget: int = 150
+    # Released LeWM evaluation settings, corrected by its maintainer in issue 38.
+    goal_offset: int = 25
+    budget: int = 50
     horizon: int = 5
     action_block: int = 5
     candidates: int = 300
-    iterations: int = 10
+    iterations: int = 30
     elites: int = 30
     initial_std: float = 1.0
 

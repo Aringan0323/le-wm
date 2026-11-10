@@ -51,6 +51,12 @@ The training batch size defaults to 32. Pass `--batch-size 80` in WSL or `-Batch
 
 The dashboard launcher for a fresh group is `tools/desktop/Start-DeltaGroup.ps1`. It uses the active experiment's sealed split after the old run has completed or been cancelled. One Pause request checkpoints all three models at the same committed batch. Resume restores this common generation. The live group counter advances once after updating all three models. `gpu-telemetry.csv` records device-wide samples and `gpu-telemetry.json` gives a rolling utilization average and a training ETA. Held-out evaluation for each model follows training.
 
+### Planning from a paused checkpoint
+
+The short checkpoint evaluation uses the released LeWM Two-Room planner that Delta-JEPA follows. It chooses 20 distinct held-out episodes with one planner seed, uses goals 25 physical steps ahead and allows 50 steps to reach them. CEM evaluates 300 sequences for 30 iterations, retaining 30 elites. Each sequence contains five chunks of five actions, and the chosen 25 actions execute before replanning. Success uses the simulator's 16-pixel distance threshold.
+
+The 25-step goal offset and 50-step budget follow the [maintainer's correction](https://github.com/lucas-maes/le-wm/issues/38). The original Delta-JEPA table uses 500 test trajectories and three evaluation seeds. Our short test selects distinct held-out episodes and then a start within each, while released LeWM evaluation samples valid starting rows. All three models receive the same tasks and sampling seeds. Models load from one verified native checkpoint generation and use the training split's action normalization.
+
 ### Sequential queue
 
 On the configured desktop, `tools/desktop/Open-Training-Dashboard.cmd` opens the dashboard at <http://127.0.0.1:8765/>. It supports pause/resume, live test metrics, loss curve toggles and encoder spread. `Queue-DeltaSweep.ps1 -Epochs 50` stages the same three runs behind the experiment in the active pointer. Add `-Planning` to include the planning benchmark. The desktop queue and standalone command are alternative launchers for the same experiment directories.

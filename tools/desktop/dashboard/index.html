@@ -29,8 +29,10 @@
 <div id="notice" class="notice" role="status"></div><div class="stats"><div class="card stat"><div class="stat-label">Current phase</div><div class="stat-value" id="phase">Preparing</div><div class="stat-detail" id="phaseDetail">No active run yet</div></div><div class="card stat"><div class="stat-label">Training throughput</div><div class="stat-value" id="throughput">—</div><div class="stat-detail" id="throughputDetail">Windows per second</div></div><div class="card stat"><div class="stat-label">GPU utilization</div><div class="stat-value" id="gpuUtil">—</div><div class="meter"><span id="gpuMeter" style="width:0%"></span></div><div class="stat-detail" id="gpuName">Waiting for GPU telemetry</div></div><div class="card stat"><div class="stat-label">GPU memory</div><div class="stat-value" id="gpuMemory">—</div><div class="stat-detail" id="gpuMemoryDetail">Allocated device memory</div></div></div>
 <section class="card test-panel" aria-labelledby="testHeading">
 <div class="section-head"><div><h2 id="testHeading">Held-out test metrics</h2><div class="subtle" id="testCoverage"></div></div><span class="test-pass" id="testPass"></span></div>
+<div id="planningPanel" hidden><h3 style="font-size:14px;margin:4px 0">Checkpoint planning</h3><div class="test-wrap"><table class="test-table"><thead><tr><th scope="col">Model</th><th scope="col">Status</th><th scope="col">Trials completed</th><th scope="col">Goals reached</th><th scope="col">Success rate</th></tr></thead><tbody id="planningRows"></tbody></table></div></div>
+<p class="test-note" id="planningProgress" hidden></p>
 <div class="test-wrap"><table class="test-table"><thead><tr><th scope="col">Model</th><th scope="col">Precision</th><th scope="col">Status</th><th scope="col">Windows tested</th><th scope="col">Next-embedding MSE</th></tr></thead><tbody id="testRows"></tbody></table></div>
-<p class="test-note" id="planningProgress" hidden></p><p class="test-note" id="testProgress"></p><p class="test-note" id="testComparison"></p>
+<p class="test-note" id="testProgress"></p><p class="test-note" id="testComparison"></p>
 <div class="reference" id="referenceScores" hidden><strong>Earlier runs on the same test windows</strong><div class="subtle" id="referenceExperiment"></div><table><thead><tr><th>Model</th><th>BF16 MSE</th><th>FP32 MSE</th></tr></thead><tbody id="referenceRows"></tbody></table></div>
 </section>
 <section id="queuePanel" class="card queue-panel" hidden><h2>Training queue</h2><ol id="queueRows"></ol></section>
@@ -260,6 +262,25 @@ function drawLatentChart(d){
   svg+='<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">'+axis.label+'</text></svg>';
   $("latentChart").innerHTML=svg;
 }
+function renderPlanning(planning) {
+  const models=Object.entries(planning.models||{}), planned=Number(planning.evaluation_trials||planning.expected_trials||0);
+  $("planningPanel").hidden=!models.length;
+  $("planningProgress").hidden=!planned;
+  const interrupted=planning.status==="running"&&planning.process_live===false;
+  $("planningRows").innerHTML=models.map(([key,m])=>{
+    const completed=Number(m.completed_trials)||0, expected=Number(m.expected_trials)||0;
+    const state=m.status==="complete"?"Final":m.status==="running"?(interrupted?"Interrupted":"Live"):m.status==="failed"?"Failed":"Queued";
+    const percent=completed>0&&num(m.success_rate_percent)?m.success_rate_percent.toFixed(1)+"%":"—";
+    return '<tr><td>'+esc(modelLabels[key]||key)+'</td><td>'+state+'</td><td>'+count(completed)+' / '+count(expected)+
+      '</td><td>'+(completed?count(m.successes):"—")+'</td><td class="test-value">'+percent+'</td></tr>';
+  }).join("");
+  if(!planned)return;
+  const completed=planning.evaluation_trials||planning.completed_trials||0;
+  const rate=planning.mean_success_percent??planning.success_rate_percent;
+  $("planningProgress").textContent=(planning.checkpoint_step?"Checkpoint "+count(planning.checkpoint_step):"Planning")+" · "+count(completed)+" / "+count(planned)+" trials"+
+    (models.length?" · Each rate covers that model’s completed trials":num(rate)?" · "+rate.toFixed(1)+"% reached the goal":"")+
+    (planning.passed?" · Final":interrupted?" · Planner stopped":planning.status==="failed"?" · Failed":planning.process_live?" · Live":"");
+}
 function renderTest(d) {
   const rows = d.evaluation_phases || [];
   const test = d.counts?.test || {};
@@ -288,14 +309,7 @@ function renderTest(d) {
     note = "Scores appear as the evaluator processes the held-out windows.";
   }
   $("testProgress").textContent = note;
-  const planning=d.planning||{},planned=Number(planning.evaluation_trials||planning.expected_trials||0);
-  $("planningProgress").hidden=!planned;
-  if(planned){
-    const completed=planning.evaluation_trials||planning.completed_trials||0;
-    const rate=planning.mean_success_percent??planning.success_rate_percent;
-    $("planningProgress").textContent="Planning · "+count(completed)+" / "+count(planned)+" trials"+
-      (num(rate)?" · "+rate.toFixed(1)+"% reached the goal":"")+(planning.passed?" · final":"");
-  }
+  renderPlanning(d.planning||{});
   renderReferenceScores(d.reference_evaluation);
   if (rows.some(row => singleModels.has(row.model))) {
     $("testComparison").textContent = "";
@@ -333,7 +347,7 @@ function renderReferenceScores(reference) {
 function positionTestPanel(d) {
   const panel = document.querySelector(".test-panel");
   const model = d.models?.length === 1 ? d.models[0].key : null;
-  const training = d.shared_batch && d.status?.phase==="train_shared" || singleModels.has(model) && ["starting","train_"+model,"audit_"+model].includes(d.status?.phase);
+  const training = !d.planning?.checkpoint_step && (d.shared_batch && d.status?.phase==="train_shared" || singleModels.has(model) && ["starting","train_"+model,"audit_"+model].includes(d.status?.phase));
   if (training && $("latentPanel").nextElementSibling !== panel) $("latentPanel").after(panel);
   if (!training && panel.nextElementSibling !== $("models")) $("models").before(panel);
 }
@@ -342,8 +356,8 @@ function renderQueue(rows){
   $("queueRows").innerHTML=rows.map(m=>'<li value="'+Number(m.queue_position)+'"><span class="queue-position">'+Number(m.queue_position)+'.</span><i class="dot" style="background:'+modelColors[m.key]+'"></i>'+esc(m.label)+'</li>').join("");
 }
 function render(d){renderQueue(d.queued_training_models||[]);positionTestPanel(d);current=d;token=d.control_token||token;const status=d.status||{},state=status.status||"preparing",pending=(d.control||{}).request==="pause"&&state==="running",job=d.control_job||{},resuming=state==="paused"&&(d.control||{}).request==="run"&&job.action==="resume"&&(job.status==="running"||job.status==="accepted");$("statusBadge").className="badge "+state;$("statusBadge").textContent=pending?"Pause requested":title(state);$("subtitle").textContent=d.available?(d.label||"Active experiment")+" · Batch "+(d.batch_size||"—")+" · "+count(((d.counts||{}).train||{}).episodes)+" training episodes":d.message||"Preparing the active experiment.";
-$("pause").disabled=!d.controls_available||state!=="running"||pending||controlBusy||job.status==="running";$("resume").disabled=!d.controls_available||state!=="paused"||resuming||controlBusy||job.status==="running";$("resume").textContent=resuming?"Resuming…":"Resume";$("pause").textContent=pending?"Pause requested":"Pause safely";
-let message=resuming?"Resume requested. Waiting for the training process to restore its checkpoint.":pending?"Pause requested. Training is still running while it finishes the current work and saves a checkpoint.":state==="paused"?"Paused. The saved training state will be used when you resume.":state==="failed"?(status.error||"The run stopped with an error. See the activity log."):"";if(job.status==="failed")message="Control request failed: "+(job.error||JSON.stringify(job.response||{}));if(d.collector_error)message="Progress could not be refreshed: "+d.collector_error;notice(message);
+$("pause").disabled=!d.controls_available||state!=="running"||pending||controlBusy||job.status==="running";$("resume").disabled=!d.controls_available||state!=="paused"||resuming||controlBusy||job.status==="running"||d.planning?.process_live===true;$("resume").textContent=resuming?"Resuming…":"Resume";$("pause").textContent=pending?"Pause requested":"Pause safely";
+let message=resuming?"Resume requested. Waiting for the training process to restore its checkpoint.":pending?"Pause requested. Training is still running while it finishes the current work and saves a checkpoint.":state==="paused"?(d.planning?.process_live?"Training is paused while the checkpoint planning test runs.":"Paused. The saved training state will be used when you resume."):state==="failed"?(status.error||"The run stopped with an error. See the activity log."):"";if(job.status==="failed")message="Control request failed: "+(job.error||JSON.stringify(job.response||{}));if(d.collector_error)message="Progress could not be refreshed: "+d.collector_error;notice(message);
 $("phase").textContent=phaseLabel(status.phase);$("phaseDetail").textContent=state==="paused"?"Saved state is paused":status.phase_started_utc?"Phase started "+new Date(status.phase_started_utc).toLocaleTimeString():"Waiting for the pipeline";const active=(d.models||[]).find(m=>m.active),rate=state==="paused"?{windows_per_second:0,steps_per_second:0,basis:"paused"}:state==="running"&&active?(active.throughput||{}):{};$("throughput").textContent=num(rate.windows_per_second)?rate.windows_per_second.toFixed(1)+" /s":"—";$("throughputDetail").textContent=state==="paused"?"Paused · no optimizer updates":num(rate.steps_per_second)?rate.steps_per_second.toFixed(2)+" steps/s · "+rate.basis+" windows/s":"Training windows per second";
 const gpu=d.gpu||{};$("gpuUtil").textContent=num(gpu.utilization)?Math.round(gpu.utilization)+"%":"—";$("gpuMeter").style.width=(gpu.utilization||0)+"%";$("gpuName").textContent=gpu.name||"GPU telemetry unavailable";$("gpuMemory").textContent=num(gpu.memory_used_mib)?(gpu.memory_used_mib/1024).toFixed(1)+" GB":"—";$("gpuMemoryDetail").textContent=num(gpu.memory_total_mib)?"of "+(gpu.memory_total_mib/1024).toFixed(1)+" GB"+(num(gpu.power_watts)?" · "+Math.round(gpu.power_watts)+" W":""):"Allocated device memory";
 if(d.shared_batch&&status.phase==="train_shared"){

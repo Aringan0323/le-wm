@@ -51,6 +51,29 @@ def tail(path):
         return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","","\n".join(text.splitlines()[-65:]))
     except OSError: return ""
 
+def planning_snapshot(experiment, linux_experiment=None):
+    directory = experiment / "planning"
+    selected = read_json(directory / "active.json").get("directory")
+    if selected:
+        if not isinstance(selected, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", selected):
+            return {}
+        directory = directory / selected
+    planning = read_json(directory / "results.json") or read_json(directory / "progress.json")
+    if not planning or not selected:
+        return planning
+    live = False
+    pid = planning.get("pid")
+    if planning.get("status") == "running" and type(pid) is int and pid > 0:
+        try:
+            args = host_path(f"/proc/{pid}/cmdline", experiment).read_bytes().decode().split("\0")
+            index = args.index("--experiment-dir")
+            live = (args[index + 1] == str(linux_experiment or experiment)
+                    and any(arg.endswith("/plan_delta_checkpoints.py") for arg in args))
+        except (OSError, UnicodeDecodeError, ValueError, IndexError):
+            pass
+    return {**planning, "process_live": live, "directory": str(directory)}
+
+
 def evaluation_phases(directory, status, progress, results, test_windows, models=PAIRED_MODELS):
     """Read the requested phase summaries and attribute partial metrics by phase ID."""
     rows = []
@@ -570,7 +593,7 @@ class Monitor:
                 member / "runs" / key / "training-indices.i64", key in DELTA_MODELS)
         queued = self.queued_training(pointer.get("queued_experiments") or (), manifest, model_keys)
         batch_size = manifest.get("training_order", {}).get("batch_size") or plan.get("batch_size") or pointer.get("training_batch_size")
-        return {"available":True,"sampled_utc":utc(),"label":pointer.get("label",experiment.name),"experiment_path":str(experiment),"host_output":pointer.get("host_output"),"status":status,"control":control,"plan":plan,"counts":manifest.get("counts",{}),"batch_size":batch_size,"models":models,"shared_batch":shared,"group_telemetry":group_telemetry,"group_progress":group_progress,"queued_training_models":queued,"gpu":self.gpu(),"planning":read_json(experiment/"planning/results.json") or read_json(experiment/"planning/progress.json"),"evaluation":results,"evaluation_progress":evaluation_progress,"evaluation_phases":phases,"reference_evaluation":reference,"reference_training_models":reference_training_models,"reference_training_token":reference_training_token,"log_tail":tail(log),"log_path":str(log),"controls_available":all((self.helpers/n).is_file() for n in ("Pause-LeWM-Training.ps1","Resume-LeWM-Training.ps1"))}
+        return {"available":True,"sampled_utc":utc(),"label":pointer.get("label",experiment.name),"experiment_path":str(experiment),"host_output":pointer.get("host_output"),"status":status,"control":control,"plan":plan,"counts":manifest.get("counts",{}),"batch_size":batch_size,"models":models,"shared_batch":shared,"group_telemetry":group_telemetry,"group_progress":group_progress,"queued_training_models":queued,"gpu":self.gpu(),"planning":planning_snapshot(experiment, pointer.get("linux_experiment")),"evaluation":results,"evaluation_progress":evaluation_progress,"evaluation_phases":phases,"reference_evaluation":reference,"reference_training_models":reference_training_models,"reference_training_token":reference_training_token,"log_tail":tail(log),"log_path":str(log),"controls_available":all((self.helpers/n).is_file() for n in ("Pause-LeWM-Training.ps1","Resume-LeWM-Training.ps1"))}
     def refresh(self):
         try: payload=self.collect()
         except Exception as error:
@@ -592,6 +615,10 @@ class Monitor:
     def request_control(self,action):
         with self.lock:
             if self.control_job and self.control_job.get("status")=="running": raise ValueError("A control request is already in progress.")
+            pointer = read_json(self.pointer)
+            if action == "resume" and pointer.get("windows_path") and planning_snapshot(
+                    Path(pointer["windows_path"]), pointer.get("linux_experiment")).get("process_live"):
+                raise ValueError("The checkpoint planning test is running. Resume training after it finishes.")
             script=self.helpers/("Pause-LeWM-Training.ps1" if action=="pause" else "Resume-LeWM-Training.ps1")
             if not script.is_file(): raise ValueError("Training control helper is not available.")
             self.control_job={"action":action,"status":"running","requested_utc":utc()}
@@ -761,6 +788,30 @@ def test_delta_dashboard(root):
     assert monitor.snapshot(status["reference_training_token"])["reference_training_omitted"]
     assert status["queued_training_models"][0]["key"] == "delta_l50_s09"
     assert status["planning"]["completed_trials"] == 3
+    checkpoint_planning = active / "planning" / "checkpoint-18411"
+    checkpoint_planning.mkdir()
+    (active / "planning/active.json").write_text(json.dumps({"directory": "checkpoint-18411"}))
+    checkpoint_progress = {"status": "running", "pid": 2147483647, "checkpoint_step": 18411,
+        "completed_trials": 3, "expected_trials": 60, "active_model": key,
+        "models": {key: {"completed_trials": 3, "expected_trials": 20, "successes": 1, "success_rate_percent": 100/3}}}
+    (checkpoint_planning / "progress.json").write_text(json.dumps(checkpoint_progress))
+    monitor.refresh()
+    assert monitor.snapshot()["planning"]["models"][key]["successes"] == 1
+    assert monitor.snapshot()["planning"]["process_live"] is False
+    from unittest.mock import patch
+    process_args = checkpoint_planning / "cmdline"
+    process_args.write_bytes(b"python\0/code/scripts/plan_delta_checkpoints.py\0--experiment-dir\0/test/group\0")
+    with patch(__name__ + ".host_path", return_value=process_args):
+        assert planning_snapshot(active, "/test/group")["process_live"]
+        assert not planning_snapshot(active, "/another/group")["process_live"]
+        process_args.write_bytes(b"python\0/code/scripts/other.py\0--experiment-dir\0/test/group\0")
+        assert not planning_snapshot(active, "/test/group")["process_live"]
+    final = {**checkpoint_progress, "status": "complete", "passed": True, "completed_trials": 60}
+    (checkpoint_planning / "results.json").write_text(json.dumps(final))
+    assert planning_snapshot(active)["passed"] and not planning_snapshot(active)["process_live"]
+    (active / "planning/active.json").write_text(json.dumps({"directory": "../elsewhere"}))
+    assert planning_snapshot(active) == {}
+    (active / "planning/active.json").unlink()
     # Reject an unmatched later epoch while retaining a verified first-pass comparator.
     (run / "order-protocol.json").write_text(json.dumps({**protocol, "order_sha256": "wrong"}))
     assert [m["key"] for m in monitor.collect()["reference_training_models"]] == ["combined"]
