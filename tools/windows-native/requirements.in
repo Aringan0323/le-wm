@@ -1,0 +1,12 @@
+torch==2.10.0
+torchvision==0.25.0
+stable-worldmodel[train,format]==0.1.1
+stable-pretraining==0.1.8
+transformers==4.57.6
+pygame
+pymunk
+shapely
+ogbench
+gymnasium-robotics
+dm-control
+imageio-ffmpeg
