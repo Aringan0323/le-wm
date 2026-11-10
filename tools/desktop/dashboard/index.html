@@ -34,7 +34,7 @@
 <div class="reference" id="referenceScores" hidden><strong>Earlier runs on the same test windows</strong><div class="subtle" id="referenceExperiment"></div><table><thead><tr><th>Model</th><th>BF16 MSE</th><th>FP32 MSE</th></tr></thead><tbody id="referenceRows"></tbody></table></div>
 </section>
 <section id="queuePanel" class="card queue-panel" hidden><h2>Training queue</h2><ol id="queueRows"></ol></section>
-<div id="models" class="models"></div><section class="card chart-card"><div class="section-head"><div><h2>Next-embedding loss</h2><div class="subtle">Training MSE · lower is better within each learned latent space</div></div><div class="legend" id="chartLegend"></div></div><div id="chart"></div><div id="curveControls" class="curve-controls"></div><div class="options"><label><input id="showTotal" type="checkbox"> All total losses (dashed)</label><label><input id="showAux" type="checkbox"> All auxiliary losses (dotted)</label><label><input id="logScale" type="checkbox"> Log scale</label><label id="matchStepsLabel" style="display:none"><input id="matchSteps" type="checkbox"> Through current step</label></div><div class="chart-note" id="chartReadout" hidden></div><div class="chart-note" id="chartNote">Training metrics update as they are written.</div></section>
+<div id="models" class="models"></div><section class="card chart-card"><div class="section-head"><div><h2>Next-embedding loss</h2><div class="subtle">Training MSE · lower is better within each learned latent space</div></div><div class="legend" id="chartLegend"></div></div><div id="chart"></div><div id="curveControls" class="curve-controls"></div><div class="options"><label><input id="showTotal" type="checkbox"> All total losses (dashed)</label><label><input id="showAux" type="checkbox"> All auxiliary losses (dotted)</label><label><input id="logScale" type="checkbox"> Log scale</label><label id="matchStepsLabel" style="display:none"><input id="matchSteps" type="checkbox"> <span id="matchRange">Through current step</span></label></div><div class="chart-note" id="chartReadout" hidden></div><div class="chart-note" id="chartNote">Training metrics update as they are written.</div></section>
 <section class="card chart-card" id="latentPanel" hidden><div class="section-head"><div><h2>Encoder variation across examples</h2><div class="subtle">RMS standard deviation across training examples at the same time and embedding coordinate.</div></div><div class="legend" id="latentLatest"></div></div><div id="latentChart"></div><div class="chart-note">Zero means that every example had the same encoded values at each time in that batch.</div></section>
 <div><section class="card panel"><div class="section-head" style="margin-bottom:0"><h2>Run activity</h2><span class="subtle" id="updated"></span></div><p id="activity">Waiting for progress.</p><details><summary>Latest log output</summary><pre id="log">No output yet.</pre></details></section></div><footer><span id="experimentLabel">Local monitor · 127.0.0.1:8765</span><span>Updates every 2 seconds · GPU telemetry every 5 seconds</span></footer></main>
 <script>
@@ -124,6 +124,17 @@ function currentLoggedStep(d){
   if(d.shared_batch)return Math.min(...models.map(m=>m.metrics?.points?.at(-1)?.step||0),d.group_progress?.optimizer_steps??Infinity);
   return models.length===1?(models[0].metrics?.points?.at(-1)?.step||0):0;
 }
+function chartAxis(d){
+  const windows=d.counts?.train?.windows,liveBatch=d.batch_size;
+  const mixed=windows>0&&liveBatch>0&&(d.reference_training_models||[]).some(m=>m.batch_size>0&&m.batch_size!==liveBatch);
+  function position(model,step){
+    if(!mixed)return step;
+    const batch=model?.batch_size||liveBatch,stepsPerEpoch=Math.ceil(windows/batch);
+    return Math.floor(step/stepsPerEpoch)*windows+Math.min((step%stepsPerEpoch)*batch,windows);
+  }
+  return {mixed,position,label:mixed?"Training windows processed":"Optimizer step",
+    current:position(d.models?.[0],currentLoggedStep(d))};
+}
 function drawChart(){
   if(!current)return;
   const active=current.models||[],refs=current.reference_training_models||[],queued=current.queued_training_models||[];
@@ -132,54 +143,57 @@ function drawChart(){
   comparisonChart=comparing;
   $("matchStepsLabel").style.display=comparing?"":"none";
   const log=$("logScale").checked, models=[...refs,...active,...queued];
-  const currentStep=currentLoggedStep(current);
-  const limit=comparing&&$("matchSteps").checked?currentStep:Infinity;
-  const label=m=>m.label+(queued.includes(m)?" · Queue "+m.queue_position+" · "+title(m.state||"queued"):refs.includes(m)?" · prior run":comparing?" · current run":"");
+  const axis=chartAxis(current),currentPosition=axis.current;
+  $("matchRange").textContent=axis.mixed?"Through current window":"Through current step";
+  const limit=comparing&&$("matchSteps").checked?currentPosition:Infinity;
+  const label=m=>m.label+(axis.mixed?" · batch "+(m.batch_size||current.batch_size):"")+(queued.includes(m)?" · Queue "+m.queue_position+" · "+title(m.state||"queued"):refs.includes(m)?" · prior run":comparing?" · current run":"");
   $("chartLegend").innerHTML=models.map(m=>'<span><i class="dot" style="background:'+modelColors[m.key]+'"></i>'+esc(label(m))+'</span>').join("");
   syncCurveControls(models);
   const series=[];let xmax=1,ymin=log?Infinity:0,ymax=-Infinity;
   for(const m of models){
     const fields=fieldsFor(m).filter(field=>isVisible(m.key,field));
     for(const field of fields){const data=[];
-      for(const p of m.metrics?.points||[]){if(p.step>limit)break;
+      for(const p of m.metrics?.points||[]){
+        const position=axis.position(m,p.step);if(position>limit)break;
         if(!num(p[field])||(log&&p[field]<=0))continue;
-        const v=log?Math.log10(p[field]):p[field];data.push([p.step,v]);
-        xmax=Math.max(xmax,p.step);ymin=Math.min(ymin,v);ymax=Math.max(ymax,v);
+        const v=log?Math.log10(p[field]):p[field];data.push([position,v,p.step]);
+        xmax=Math.max(xmax,position);ymin=Math.min(ymin,v);ymax=Math.max(ymax,v);
       }
       if(data.length)series.push({m,field,data});
     }
   }
   const sampled=models.some(m=>(m.metrics?.sample_stride||1)>1);
   const historical=(current.shared_batch||deltaModels.has(live?.key))&&refs.some(m=>m.epochs===1);
-  const note=comparing?((historical?"Earlier one-epoch runs share the first epoch’s window order. ":"Same training windows and optimizer-step axis. ")+
-    (limit<Infinity?"All curves stop at the current run’s latest logged step ("+count(currentStep)+").":
-    "Prior runs show their full history. "+(current.shared_batch?"The shared runs have logged through step ":"The current curve ends at step ")+count(currentStep)+"."))
+  const pointUnit=axis.mixed?"window":"step";
+  const note=comparing?((axis.mixed?"Curves align by the number of training windows each model has processed. ":historical?"Earlier one-epoch runs share the first epoch’s window order. ":"Same training windows and optimizer-step axis. ")+
+    (limit<Infinity?"All curves stop at the current run’s latest logged "+pointUnit+" ("+count(currentPosition)+").":
+    "Prior runs show their full history. The current run has logged through "+pointUnit+" "+count(currentPosition)+"."))
     :models.some(m=>m.metrics?.truncated)?"Showing recent history. The original CSV files retain the full records.":"Training metrics update as they are written.";
   $("chartNote").textContent=note+(sampled?" Long curves show sampled optimizer steps across their full history.":"");
-  if(!series.length){$("chartReadout").hidden=true;$("chart").innerHTML='<div class="chart-empty">No logged points for the selected curves and step range.</div>';return;}
+  if(!series.length){$("chartReadout").hidden=true;$("chart").innerHTML='<div class="chart-empty">No logged points for the selected curves and range.</div>';return;}
   const W=1100,H=280,L=65,R=24,T=16,B=38;
   if(ymax<=ymin)ymax=ymin+1;
   const pad=(ymax-ymin)*.06;ymax+=pad;if(log)ymin-=pad;
   const x=v=>L+v/xmax*(W-L-R),y=v=>T+(ymax-v)/(ymax-ymin)*(H-T-B);
-  let svg='<svg class="chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Training loss by optimizer step">';
+  let svg='<svg class="chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Training loss by '+axis.label+'">';
   for(let i=0;i<=4;i++){const v=ymin+(ymax-ymin)*i/4,yy=y(v);
     svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#e8edf3"/><text x="'+(L-10)+'" y="'+(yy+4)+'" text-anchor="end" fill="#6c788a" font-size="10">'+(log?Math.pow(10,v).toExponential(1):loss(v))+'</text>';
   }
   const n=Math.min(4,xmax);for(let i=0;i<=n;i++){const step=Math.round(i*xmax/n);
     svg+='<text x="'+x(step)+'" y="'+(H-14)+'" text-anchor="middle" fill="#6c788a" font-size="10">'+count(step)+'</text>';}
-  if(comparing&&currentStep>0&&currentStep<xmax)
-    svg+='<line x1="'+x(currentStep)+'" x2="'+x(currentStep)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="'+(modelColors[live?.key]||"#69788b")+'" opacity=".38" stroke-dasharray="4 5"><title>Current run: step '+count(currentStep)+'</title></line>';
+  if(comparing&&currentPosition>0&&currentPosition<xmax)
+    svg+='<line x1="'+x(currentPosition)+'" x2="'+x(currentPosition)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="'+(modelColors[live?.key]||"#69788b")+'" opacity=".38" stroke-dasharray="4 5"><title>Current run: '+pointUnit+' '+count(currentPosition)+'</title></line>';
   const dashes={loss:"7 5",aux_loss:"2 5",sigreg_loss:"2 5",action_loss:"2 3 7 3",ldad_loss:"3 3"};
   const fieldNames={pred_loss:"Next-embedding MSE",loss:"Total loss",aux_loss:"Auxiliary loss",sigreg_loss:"SIGReg loss",action_loss:"Encoded action prediction loss",ldad_loss:"Raw LDAD MSE"};
   for(const {m,field,data} of series){
     const pts=visiblePoints(data,xmax,W-L-R),last=data[data.length-1];
     const path=pts.map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+","+y(p[1]).toFixed(2)).join(" ");
     const color=modelColors[m.key]||"#2563eb";
-    svg+='<path data-model="'+esc(m.key)+'" data-metric="'+field+'" data-last-step="'+last[0]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="'+(field==="pred_loss"?1.9:1.3)+'" stroke-linejoin="round"'+(dashes[field]?' stroke-dasharray="'+dashes[field]+'"':"")+'><title>'+esc(label(m))+' · '+fieldNames[field]+'</title></path>';
+    svg+='<path data-model="'+esc(m.key)+'" data-metric="'+field+'" data-last-step="'+last[2]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="'+(field==="pred_loss"?1.9:1.3)+'" stroke-linejoin="round"'+(dashes[field]?' stroke-dasharray="'+dashes[field]+'"':"")+'><title>'+esc(label(m))+' · '+fieldNames[field]+'</title></path>';
     if(data.length===1||(comparing&&active.includes(m)&&field==="pred_loss"))
-      svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3.5" fill="'+color+'" stroke="white"><title>Step '+count(last[0])+' · '+loss(log?Math.pow(10,last[1]):last[1])+'</title></circle>';
+      svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3.5" fill="'+color+'" stroke="white"><title>Step '+count(last[2])+' · '+loss(log?Math.pow(10,last[1]):last[1])+'</title></circle>';
   }
-  $("chart").innerHTML=svg+'<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">Optimizer step</text></svg>';
+  $("chart").innerHTML=svg+'<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">'+axis.label+'</text></svg>';
   const chart=$("chart").querySelector("svg");
   function readStep(step){
     const readout=$("chartReadout");
@@ -187,12 +201,13 @@ function drawChart(){
     if(step==null){readout.hidden=true;return;}
     const values=series.map(({m,field})=>{
       const pts=m.metrics?.points||[];let lo=0,hi=pts.length;
-      while(lo<hi){const mid=(lo+hi)>>>1;if(pts[mid].step<k)lo=mid+1;else hi=mid;}
-      const row=pts[lo];
-      const value=row?.step===k&&num(row[field])?loss(row[field]):"—";
+      while(lo<hi){const mid=(lo+hi)>>>1;if(axis.position(m,pts[mid].step)<k)lo=mid+1;else hi=mid;}
+      let row=pts[lo];
+      if(row&&axis.position(m,row.step)!==k)row=axis.mixed?pts[lo-1]:null;
+      const value=row&&num(row[field])?loss(row[field])+(axis.mixed?" at "+count(axis.position(m,row.step)):""):"—";
       return (modelLabels[m.key]||m.label)+" "+fieldLabels[field]+": "+value;
     });
-    readout.hidden=false;readout.textContent="Step "+count(k)+" · "+values.join("   |   ");
+    readout.hidden=false;readout.textContent=(axis.mixed?"Window ":"Step ")+count(k)+" · "+values.join("   |   ");
   }
   readStep(inspectStep);
   $("chart").onpointermove=event=>{
@@ -211,13 +226,14 @@ function drawLatentChart(d){
   const hasSpread=m=>m.metrics?.points?.some(p=>num(p.latent_cross_example_rms_std)&&p.latent_cross_example_count>1);
   const models=[...refs.filter(hasSpread),...[...active,...queued].filter(m=>spreadModels.has(m.key)||hasSpread(m))];
   $("latentPanel").hidden=!models.length;if(!models.length)return;
-  const limit=(active.length===1||d.shared_batch)&&refs.length&&$("matchSteps").checked?currentLoggedStep(d):Infinity;
+  const axis=chartAxis(d);
+  const limit=(active.length===1||d.shared_batch)&&refs.length&&$("matchSteps").checked?axis.current:Infinity;
   const curves=models.map(model=>({model,points:(model.metrics?.points||[])
-    .filter(p=>p.step<=limit&&num(p.latent_cross_example_rms_std)&&p.latent_cross_example_rms_std>=0&&p.latent_cross_example_count>1)
-    .map(p=>[p.step,p.latent_cross_example_rms_std])}));
+    .filter(p=>axis.position(model,p.step)<=limit&&num(p.latent_cross_example_rms_std)&&p.latent_cross_example_rms_std>=0&&p.latent_cross_example_count>1)
+    .map(p=>[axis.position(model,p.step),p.latent_cross_example_rms_std,p.step])}));
   $("latentLatest").innerHTML=curves.map(({model,points})=>{
-    const last=points.at(-1),value=last?"Step "+count(last[0])+" · RMS "+loss(last[1]):"Awaiting data";
-    return '<span><i class="dot" style="background:'+modelColors[model.key]+'"></i>'+esc(model.label||modelLabels[model.key])+" · "+value+'</span>';
+    const last=points.at(-1),value=last?(axis.mixed?"Window ":"Step ")+count(last[0])+" · RMS "+loss(last[1]):"Awaiting data";
+    return '<span><i class="dot" style="background:'+modelColors[model.key]+'"></i>'+esc(model.label||modelLabels[model.key])+(axis.mixed?" · batch "+(model.batch_size||d.batch_size):"")+" · "+value+'</span>';
   }).join("");
   if(!curves.some(curve=>curve.points.length)){
     $("latentChart").innerHTML='<div class="chart-empty">Waiting for the first recorded batch with at least two examples.</div>';
@@ -226,7 +242,7 @@ function drawLatentChart(d){
   const W=1100,H=220,L=70,R=24,T=14,B=36,xmax=Math.max(1,...curves.map(c=>c.points.at(-1)?.[0]||0));
   const ymax=curves.reduce((max,c)=>c.points.reduce((m,p)=>Math.max(m,p[1]),max),0)*1.06||1;
   const x=v=>L+v/xmax*(W-L-R),y=v=>T+(1-v/ymax)*(H-T-B);
-  let svg='<svg class="chart latent-chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="RMS cross-example latent standard deviation by optimizer step">';
+  let svg='<svg class="chart latent-chart" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="RMS cross-example latent standard deviation by '+axis.label+'">';
   for(let i=0;i<=4;i++){
     const v=ymax*i/4,yy=y(v);
     svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#e8edf3"/><text x="'+(L-8)+'" y="'+(yy+4)+'" text-anchor="end" fill="#6c788a" font-size="10">'+loss(v)+'</text>';
@@ -238,10 +254,10 @@ function drawLatentChart(d){
     if(!points.length)continue;
     const last=points.at(-1),color=modelColors[model.key];
     const path=visiblePoints(points,xmax,W-L-R).map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+","+y(p[1]).toFixed(2)).join(" ");
-    svg+='<path data-model="'+esc(model.key)+'" data-metric="latent_cross_example_rms_std" data-last-step="'+last[0]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1.9"><title>'+esc(model.label||modelLabels[model.key])+'</title></path>';
+    svg+='<path data-model="'+esc(model.key)+'" data-metric="latent_cross_example_rms_std" data-last-step="'+last[2]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1.9"><title>'+esc(model.label||modelLabels[model.key])+'</title></path>';
     svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3" fill="'+color+'"/>';
   }
-  svg+='<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">Optimizer step</text></svg>';
+  svg+='<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">'+axis.label+'</text></svg>';
   $("latentChart").innerHTML=svg;
 }
 function renderTest(d) {

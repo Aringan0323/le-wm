@@ -115,14 +115,25 @@ def reference_sources(reference_path, comparisons):
     return sources
 
 def same_training_protocol(current, previous, *, allow_relocation):
-    if previous.get("training_order") != current.get("training_order"):
-        return False
-    if current.get("manifest_sha256") and current["manifest_sha256"] == previous.get("manifest_sha256"):
+    same_batches = previous.get("training_order") == current.get("training_order")
+    if same_batches and current.get("manifest_sha256") and current["manifest_sha256"] == previous.get("manifest_sha256"):
         return True
     if not allow_relocation:
         return False
-    # A new installation can have different paths/timestamps while its split,
-    # cached arrays, normalizers and underlying dataset geometry remain identical.
+    if not same_batches:
+        orders = []
+        for manifest in (current, previous):
+            order = manifest.get("training_order", {})
+            batch = order.get("batch_size")
+            windows = manifest.get("counts", {}).get("train", {}).get("windows")
+            if (type(batch) is not int or batch < 1 or type(windows) is not int or windows < 1
+                    or order.get("drop_last") is not False or order.get("steps_per_epoch") != math.ceil(windows / batch)):
+                return False
+            orders.append({key: val for key, val in order.items() if key not in ("batch_size", "steps_per_epoch")})
+        if orders[0] != orders[1]:
+            return False
+    # Hash each sealed manifest before accepting relocated paths or a different batch grouping.
+    # reference_training additionally verifies the actual sample-order prefix and epoch trace.
     for manifest in (current, previous):
         content = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
         encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -330,7 +341,8 @@ class Monitor:
                 return None
         except (OSError, KeyError, TypeError):
             return None
-        curve = {"key": model, "label": LABELS[model], "experiment": reference.name, "epochs": epochs, "metrics": metrics}
+        curve = {"key": model, "label": LABELS[model], "experiment": reference.name, "epochs": epochs,
+                 "batch_size": manifest["training_order"].get("batch_size"), "metrics": metrics}
         # Bind the client token to the verified source generation and exact
         # serialized curve. This cost is paid only when the files change.
         signature = hashlib.sha256(json.dumps([manifest_hash, stamp, curve], separators=(",", ":"),
@@ -669,15 +681,19 @@ def test_delta_dashboard(root):
     monitor.gpu = lambda: {}
     # A relocated dataset's manifest can have a different hash but still use
     # identical training windows, statistics and data-order protocol.
-    def sealed(path, normalization):
-        value = {"schema_version": 1, "split": {"seed": 32}, "window": {"span": 20}, "counts": {"train": 3},
-                 "training_order": {"seed": 42}, "normalization": normalization, "array_hashes": {"train_clip_indices": "clips"},
+    def sealed(path, normalization, batch=2, seed=42, drop_last=False):
+        value = {"schema_version": 1, "split": {"seed": 32}, "window": {"span": 20}, "counts": {"train": {"windows": 3}},
+                 "training_order": {"seed": seed, "batch_size": batch, "steps_per_epoch": math.ceil(3 / batch), "drop_last": drop_last}, "normalization": normalization, "array_hashes": {"train_clip_indices": "clips"},
                  "dataset": {"path": path, "columns": ["pixels", "action"], "episode_count": 2, "row_count": 21,
                              "episode_lengths_sha256": "lengths", "episode_offsets_sha256": "offsets"}}
         digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {**value, "manifest_sha256": digest}
     assert same_training_protocol(sealed("/a", {}), sealed("/b", {}), allow_relocation=True)
     assert not same_training_protocol(sealed("/a", {}), sealed("/b", {"action": [0.1]}), allow_relocation=True)
+    assert same_training_protocol(sealed("/a", {}, 2), sealed("/b", {}, 3), allow_relocation=True)
+    assert not same_training_protocol(sealed("/a", {}, 2), sealed("/b", {}, 3), allow_relocation=False)
+    assert not same_training_protocol(sealed("/a", {}, 2), sealed("/b", {}, 3, seed=7), allow_relocation=True)
+    assert not same_training_protocol(sealed("/a", {}, 2), sealed("/b", {}, 3, drop_last=True), allow_relocation=True)
     # A native append stream retains its first point, handles unfinished lines,
     # and reconciles a resume that replaces the abandoned tail.
     path = root / "long.csv"
@@ -741,6 +757,7 @@ def test_delta_dashboard(root):
     assert model["progress"]["current_epoch"] == 2 and model["progress"]["expected_steps"] == 4
     assert [m["key"] for m in status["reference_training_models"]] == ["combined", "delta_l0_s09"]
     assert [m["epochs"] for m in status["reference_training_models"]] == [1, 2]
+    assert all(m["batch_size"] == 2 for m in status["reference_training_models"])
     assert monitor.snapshot(status["reference_training_token"])["reference_training_omitted"]
     assert status["queued_training_models"][0]["key"] == "delta_l50_s09"
     assert status["planning"]["completed_trials"] == 3
