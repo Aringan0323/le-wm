@@ -472,17 +472,29 @@ class Monitor:
         control=read_json(experiment/"control.json"); names=pointer.get("model_names",pointer.get("models",{}))
         if not isinstance(names,dict): names={}
         model_keys = tuple(key for key in LABELS if key in names) or PAIRED_MODELS
+        shared = set(model_keys) == set(DELTA_MODELS) and (pointer.get("shared_batch") is True
+                    or plan.get("training_backend") == "native_pytorch_shared_batch" or (experiment / "members").is_dir())
+        group_progress = read_json(experiment / "group-progress.json") if shared else {}
+        group_checkpoint = read_json(experiment / "group-checkpoint.json") if shared else {}
+        group_telemetry = read_json(experiment / "gpu-telemetry.json") if shared else {}
         models=[]
         for key in model_keys:
-            label = LABELS[key]
-            run=experiment/"runs"/key; progress=read_json(run/"progress.json"); completion=read_json(run/"runcompletion.json")
+            decoder_free = shared and key == "delta_l0_s09"
+            label = "SIGReg 0.09 (no LDAD)" if decoder_free else LABELS[key]
+            member = experiment / "members" / key if shared else experiment
+            run=member/"runs"/key; progress=read_json(run/"progress.json"); completion=read_json(run/"runcompletion.json")
+            if shared:
+                # One optimizer cursor commits all three members. Each objective's
+                # loss and CSV stay local to its own model.
+                own_losses = group_progress.get("members", {}).get(key, {}).get("last_losses", progress.get("last_losses", {}))
+                progress = {**progress, **group_progress, "last_losses": own_losses}
             name=names.get(key,"")
             if isinstance(name,dict): name=name.get("name",name.get("model_name",""))
             metrics_path=run/"metrics.csv"
             if not metrics_path.exists() and completion.get("registry_run"): metrics_path=host_path(completion["registry_run"],experiment)/"metrics.csv"
             metrics=self.metrics(metrics_path, all_steps=(key in SINGLE_MODELS), multi_epoch=key in DELTA_MODELS,
                                  generation=progress.get("resume_count", 0))
-            active=status.get("phase")=="train_"+key
+            active=status.get("phase")==("train_shared" if shared else "train_"+key)
             state="complete" if completion.get("passed") or progress.get("status")=="complete" else progress.get("status","waiting")
             if active and status.get("status") in ("paused", "failed"): state=status["status"]
             epochs = int(progress.get("epochs") or plan.get("epochs") or (50 if key in DELTA_MODELS else 1))
@@ -494,35 +506,59 @@ class Monitor:
             latest = metrics["points"][-1] if metrics["points"] else {}
             last_losses = {}
             loss_fields = ("pred_loss", "loss", "sigreg_loss", "action_loss")
-            for field in (*loss_fields, "ldad_loss") if key in DELTA_MODELS else loss_fields:
+            for field in (*loss_fields, "ldad_loss") if key in DELTA_MODELS and not decoder_free else loss_fields:
                 observed = number(progress.get("last_losses", {}).get(field))
                 last_losses[field] = observed if observed is not None else number(latest.get(field))
             pred = last_losses["pred_loss"]
             rate=self.rate(str(experiment)+key,progress,active and status.get("status")=="running")
             speed=rate.get("steps_per_second")
             eta=max(0,(number(progress.get("expected_steps")) or 0)-(number(progress.get("optimizer_steps")) or 0))/speed if speed and speed>0 else None
-            models.append({"key":key,"label":label,"name":name,"state":state,"active":active,"progress":progress,"last_pred_loss":pred,"last_losses":last_losses,"metrics":metrics,"throughput":rate,"recent_eta_seconds":eta,"checkpoint":self.checkpoint(run,progress,completion,experiment)})
+            if shared:
+                saved = group_checkpoint.get("saved_utc")
+                checkpoint = {"available": bool(saved), "age_seconds": age(saved), "step": group_checkpoint.get("global_step")}
+                telemetry_age = age(group_telemetry.get("sampled_utc"))
+                if active and number(group_telemetry.get("eta_seconds")) is not None and telemetry_age is not None and telemetry_age < 120:
+                    eta = number(group_telemetry["eta_seconds"])
+                elif eta is None:
+                    eta = number(group_progress.get("eta_seconds"))
+            else:
+                checkpoint = self.checkpoint(run,progress,completion,member)
+            models.append({"key":key,"label":label,"ldad_enabled":key in DELTA_MODELS and not decoder_free,"name":name,"state":state,"active":active,"progress":progress,"last_pred_loss":pred,"last_losses":last_losses,"metrics":metrics,"throughput":rate,"recent_eta_seconds":eta,"checkpoint":checkpoint})
         log=host_path(status.get("log",""),experiment) if status.get("log") else None
         if log is None or not log.is_file():
             active=next((m for m in models if m["active"]),None)
-            log=experiment/"runs"/(active["key"] if active else model_keys[0])/"console.log"
-        evaluation_dir = experiment / "evaluation"
-        results = read_json(evaluation_dir / "results.json")
-        evaluation_progress = read_json(evaluation_dir / "progress.json")
-        phase_progress = evaluation_progress or (status.get("child_progress", {}) if status.get("phase") == "evaluate_next_embedding" else {})
-        phases = evaluation_phases(evaluation_dir, status, phase_progress, results, manifest.get("counts", {}).get("test", {}).get("windows"), model_keys)
+            log=(experiment/"training.log" if shared else experiment/"runs"/(active["key"] if active else model_keys[0])/"console.log")
+        test_windows = manifest.get("counts", {}).get("test", {}).get("windows")
+        if shared:
+            results, evaluation_progress, phases = {}, {}, []
+            for key in model_keys:
+                directory = experiment / "members" / key / "evaluation"
+                complete = read_json(directory / "results.json")
+                live = read_json(directory / "progress.json")
+                member_status = dict(status)
+                if status.get("phase") == f"evaluate_{key}":
+                    member_status["phase"] = "evaluate_next_embedding"
+                    evaluation_progress = live
+                phases.extend(evaluation_phases(directory, member_status, live, complete, test_windows, (key,)))
+        else:
+            evaluation_dir = experiment / "evaluation"
+            results = read_json(evaluation_dir / "results.json")
+            evaluation_progress = read_json(evaluation_dir / "progress.json")
+            phase_progress = evaluation_progress or (status.get("child_progress", {}) if status.get("phase") == "evaluate_next_embedding" else {})
+            phases = evaluation_phases(evaluation_dir, status, phase_progress, results, test_windows, model_keys)
         comparisons = [entry for entry in (pointer.get("comparison_experiments") or ()) if entry.get("key") not in model_keys]
         reference = reference_scores(pointer.get("reference_experiment_windows_path"), manifest, comparisons)
         reference_training_models = []
         reference_training_token = None
-        if len(model_keys) == 1 and model_keys[0] in SINGLE_MODELS:
+        if shared or (len(model_keys) == 1 and model_keys[0] in SINGLE_MODELS):
             key = model_keys[0]
+            member = experiment / "members" / key if shared else experiment
             reference_training_models, reference_training_token = self.reference_training(
                 pointer.get("reference_experiment_windows_path"), manifest, models[0]["progress"], comparisons,
-                experiment / "runs" / key / "training-indices.i64", key in DELTA_MODELS)
+                member / "runs" / key / "training-indices.i64", key in DELTA_MODELS)
         queued = self.queued_training(pointer.get("queued_experiments") or (), manifest, model_keys)
         batch_size = manifest.get("training_order", {}).get("batch_size") or plan.get("batch_size") or pointer.get("training_batch_size")
-        return {"available":True,"sampled_utc":utc(),"label":pointer.get("label",experiment.name),"experiment_path":str(experiment),"host_output":pointer.get("host_output"),"status":status,"control":control,"plan":plan,"counts":manifest.get("counts",{}),"batch_size":batch_size,"models":models,"queued_training_models":queued,"gpu":self.gpu(),"planning":read_json(experiment/"planning/results.json") or read_json(experiment/"planning/progress.json"),"evaluation":results,"evaluation_progress":evaluation_progress,"evaluation_phases":phases,"reference_evaluation":reference,"reference_training_models":reference_training_models,"reference_training_token":reference_training_token,"log_tail":tail(log),"log_path":str(log),"controls_available":all((self.helpers/n).is_file() for n in ("Pause-LeWM-Training.ps1","Resume-LeWM-Training.ps1"))}
+        return {"available":True,"sampled_utc":utc(),"label":pointer.get("label",experiment.name),"experiment_path":str(experiment),"host_output":pointer.get("host_output"),"status":status,"control":control,"plan":plan,"counts":manifest.get("counts",{}),"batch_size":batch_size,"models":models,"shared_batch":shared,"group_telemetry":group_telemetry,"group_progress":group_progress,"queued_training_models":queued,"gpu":self.gpu(),"planning":read_json(experiment/"planning/results.json") or read_json(experiment/"planning/progress.json"),"evaluation":results,"evaluation_progress":evaluation_progress,"evaluation_phases":phases,"reference_evaluation":reference,"reference_training_models":reference_training_models,"reference_training_token":reference_training_token,"log_tail":tail(log),"log_path":str(log),"controls_available":all((self.helpers/n).is_file() for n in ("Pause-LeWM-Training.ps1","Resume-LeWM-Training.ps1"))}
     def refresh(self):
         try: payload=self.collect()
         except Exception as error:
@@ -713,6 +749,53 @@ def test_delta_dashboard(root):
     assert [m["key"] for m in monitor.collect()["reference_training_models"]] == ["combined"]
     (run / "order-protocol.json").write_text(json.dumps({**protocol, "epoch_sha256": ["wrong"]}))
     assert monitor.collect()["reference_training_models"] == []
+
+    group = root / "shared"
+    group.mkdir()
+    (group / "manifest.json").write_text(json.dumps(manifest))
+    (group / "control.json").write_text(json.dumps({"request": "run"}))
+    (group / "plan.json").write_text(json.dumps({"epochs": 2, "training_backend": "native_pytorch_shared_batch"}))
+    (group / "status.json").write_text(json.dumps({"status": "running", "phase": "train_shared"}))
+    (group / "group-checkpoint.json").write_text(json.dumps({"global_step": 2, "saved_utc": utc()}))
+    (group / "group-progress.json").write_text(json.dumps({**progress, "status": "running", "expected_steps": 4, "eta_seconds": 10}))
+    (group / "gpu-telemetry.json").write_text(json.dumps({"sampled_utc": utc(), "gpu_util_percent_mean": 79,
+                                                        "sample_count": 12, "group_steps_per_second": 2, "eta_seconds": .5}))
+    (root / "pointer.json").write_text(json.dumps({"shared_batch": True, "windows_path": str(group),
+        "model_names": {key: key + "-shared" for key in DELTA_MODELS},
+        "comparison_experiments": [{"key":"combined", "windows_path":str(old)}]}))
+    for i, key in enumerate(DELTA_MODELS):
+        member = group / "members" / key
+        run = member / "runs" / key
+        run.mkdir(parents=True)
+        (run / "training-indices.i64").write_bytes(schedule[:48])
+        (run / "order-protocol.json").write_text(json.dumps(protocol))
+        if key == "delta_l0_s09":
+            (run / "metrics.csv").write_text("step,fit/pred_loss,fit/sigreg_loss,fit/loss\n" + "".join(f"{s},.{i+1},.2,.4\n" for s in range(1, 4)))
+        else:
+            (run / "metrics.csv").write_text(header + "".join(f"{s},.{i+1},.2,.4\n" for s in range(1, 4)))
+        (member / "evaluation").mkdir()
+    shared = monitor.collect()
+    assert shared["shared_batch"] and shared["group_telemetry"]["gpu_util_percent_mean"] == 79
+    assert [m["key"] for m in shared["models"]] == list(DELTA_MODELS)
+    assert [m["last_pred_loss"] for m in shared["models"]] == [.1, .2, .3]
+    control_model = shared["models"][0]
+    assert not control_model["ldad_enabled"] and "ldad_loss" not in control_model["last_losses"]
+    assert all("ldad_loss" not in p for p in control_model["metrics"]["points"])
+    assert all(m["active"] and m["progress"]["optimizer_steps"] == 3 and m["recent_eta_seconds"] == .5
+               and m["checkpoint"]["step"] == 2 for m in shared["models"])
+    assert [m["key"] for m in shared["reference_training_models"]] == ["combined"]
+    assert len(shared["evaluation_phases"]) == 6 and all(r["state"] == "waiting" for r in shared["evaluation_phases"])
+    done, scoring, queued = DELTA_MODELS
+    (group / "status.json").write_text(json.dumps({"status":"running", "phase":"evaluate_"+scoring}))
+    (group / "members" / done / "evaluation/results.json").write_text(json.dumps({"passed":True,"models":{done:{
+        p:{"complete":True, "windows":3, "validation_arithmetic_mse":.01} for p in ("bf16_mixed","fp32")}}}))
+    (group / "members" / scoring / "evaluation/progress.json").write_text(json.dumps({"phase":scoring+"--bf16_mixed",
+        "completed_windows":2,"total_windows":3,"validation_arithmetic_mse_so_far":.02}))
+    assessed = monitor.collect()
+    assert not any(m["active"] for m in assessed["models"])
+    assert [(r["model"], r["state"], r["mse"]) for r in assessed["evaluation_phases"]] == [
+        (done,"complete",.01),(done,"complete",.01),(scoring,"running",.02),(scoring,"waiting",None),
+        (queued,"waiting",None),(queued,"waiting",None)]
 
 
 def self_test():
@@ -917,7 +1000,7 @@ def self_test():
             try: urllib.request.urlopen(urllib.request.Request(url+"/api/control/pause",data=b"{}",method="POST"),timeout=5); raise AssertionError("Tokenless control accepted")
             except urllib.error.HTTPError as error: assert error.code==403
         finally: server.shutdown(); server.server_close()
-    print(json.dumps({"passed":True,"checks":["three Delta-JEPA models, bounded incremental curves and verified multi-epoch comparisons","ordered queue and all eight historical model histories through promotion","live and historical across-example latent variation","matched reference scores and full training curves",
+    print(json.dumps({"passed":True,"checks":["shared progress and ETA, three independent loss histories, checkpoint and six precision passes","three Delta-JEPA models, bounded incremental curves and verified multi-epoch comparisons","ordered queue and all eight historical model histories through promotion","live and historical across-example latent variation","matched reference scores and full training curves",
         "evaluation phase states and MSE attribution","HTTP status/UI and opt-in reference caching","control token rejection"]}))
 
 def main():

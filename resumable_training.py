@@ -213,11 +213,12 @@ class IndexedWindowDataset(torch.utils.data.Dataset):
         return [self[index] for index in indices]
 
 
-def capture_rng_state():
+def capture_rng_state(synchronize=True):
     state = {"python": random.getstate(), "numpy": np.random.get_state(),
              "torch_cpu": torch.get_rng_state().clone(), "torch_cuda": None}
     if torch.cuda.is_initialized():
-        torch.cuda.synchronize()
+        if synchronize:
+            torch.cuda.synchronize()
         state["torch_cuda"] = [item.clone().cpu() for item in torch.cuda.get_rng_state_all()]
     return state
 
@@ -346,8 +347,9 @@ class CheckpointManager:
             temporary.unlink(missing_ok=True)
         return target
 
-    def save(self, model, optimizer, scheduler, sigreg, sampler, trace,
-             status="running", extra=None, final=False):
+    def stage(self, model, optimizer, scheduler, sigreg, sampler, trace,
+              status="running", extra=None, rng=None):
+        """Durably write a generation and checksum without advancing any live alias."""
         if sampler.cursor != trace.cursor:
             raise ValueError("Cannot checkpoint inconsistent model/sample trace cursors")
         same_order = sampler.order is self.order if self.multi_epoch else np.array_equal(sampler.order, self.order)
@@ -369,7 +371,7 @@ class CheckpointManager:
             "total_windows": len(self.order), "expected_steps": sampler.total_steps,
             "order_sha256": self.order_hash,
             "trace_sha256": trace.digest.hexdigest(), "trace_bytes": trace.cursor * 8,
-            "rng": capture_rng_state(), "extra": extra or {},
+            "rng": capture_rng_state() if rng is None else rng, "extra": extra or {},
         }
         if self.multi_epoch:
             metadata["order_protocol"] = self.order.protocol
@@ -392,21 +394,34 @@ class CheckpointManager:
                 "sha256": checksum, "size_bytes": generation.stat().st_size,
                 "generation_id": generation_id, "global_step": sampler.global_step,
                 "windows_seen": sampler.cursor, "saved_utc": saved_utc})
-            self._promote(generation, "last.ckpt")
-            selected = self._promote(generation, "final.ckpt") if final else self.directory / "last.ckpt"
         finally:
             temporary.unlink(missing_ok=True)
-        previous_generation = (self.latest_record or {}).get("generation_id")
-        self.latest_record = {"path": str(selected), "global_step": sampler.global_step,
-                              "windows_seen": sampler.cursor, "saved_utc": saved_utc,
-                              "size_bytes": generation.stat().st_size, "sha256": checksum,
-                              "status": status, "generation_id": generation_id}
+        return {"path": str(generation), "global_step": sampler.global_step, "windows_seen": sampler.cursor,
+                "saved_utc": saved_utc, "size_bytes": generation.stat().st_size, "sha256": checksum,
+                "status": status, "generation_id": generation_id, "config_sha256": self.config_sha256}
+
+    def publish(self, record, final=False, previous_generation=None, initial_generation=None):
+        """Promote a staged or recovered generation after its enclosing commit."""
+        generation_id = record["generation_id"]
+        generation = Path(record["path"])
+        if generation.parent != self.directory or generation.name != generation_id + ".ckpt":
+            raise ValueError("Staged checkpoint path differs from the run directory")
+        if previous_generation is None:
+            previous_generation = (self.latest_record or {}).get("generation_id")
+        selected = self._promote(generation, "last.ckpt")
+        if final:
+            selected = self._promote(generation, "final.ckpt")
+        elif (self.directory / "final.ckpt").exists():
+            # Reconciliation to an earlier valid group generation invalidates a stale final alias.
+            (self.directory / "final.ckpt").unlink()
+            _fsync_directory(self.directory)
+        self.latest_record = dict(record, path=str(selected))
         atomic_json(self.run_dir / "checkpoint.json", self.latest_record)
         if self.multi_epoch:
             # Publish and fsync the new aliases/record before pruning exact known
             # generations. Preserve the initial state and the previous durable save.
             initial = sorted(self.directory.glob("step-00000000-*.ckpt"), key=lambda p: p.stat().st_mtime_ns)
-            keep = {generation_id, previous_generation, initial[0].stem if initial else None}
+            keep = {generation_id, previous_generation, initial_generation or (initial[0].stem if initial else None)}
             for candidate in self.directory.glob("step-*.ckpt"):
                 if candidate.stem in keep:
                     continue
@@ -416,6 +431,11 @@ class CheckpointManager:
             _fsync_directory(self.directory)
         self.last_saved_at = self.clock()
         return selected
+
+    def save(self, model, optimizer, scheduler, sigreg, sampler, trace,
+             status="running", extra=None, final=False):
+        record = self.stage(model, optimizer, scheduler, sigreg, sampler, trace, status, extra)
+        return self.publish(record, final=final)
 
     def load(self, path, model, optimizer, scheduler, sigreg=None, sampler=None, restore_rng=False):
         # Checkpoints are locally authored trusted artifacts; RNG includes NumPy state.

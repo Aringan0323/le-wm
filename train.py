@@ -155,13 +155,14 @@ def delta_jepa_forward(self, batch, stage, cfg):
     output = mse_only_compute(self.model, None, batch["pixels"], batch["action"],
                               history_size=cfg.history_size, num_preds=1)
     emb = output["emb"]
-    target_actions = batch["executed_actions"]
     weight = cfg.loss.ldad.weight
-    with torch.set_grad_enabled(torch.is_grad_enabled() and weight > 0):
-        predicted_actions = self.model.ldad(emb[:, 1:] - emb[:, :-1])
-        if predicted_actions.shape != target_actions.shape:
-            raise ValueError("LDAD predictions must match the recorded per-interval action sequence")
-        output["ldad_loss"] = torch.nn.functional.mse_loss(predicted_actions.float(), target_actions.float())
+    if self.model.ldad is not None:
+        target_actions = batch["executed_actions"]
+        with torch.set_grad_enabled(torch.is_grad_enabled() and weight > 0):
+            predicted_actions = self.model.ldad(emb[:, 1:] - emb[:, :-1])
+            if predicted_actions.shape != target_actions.shape:
+                raise ValueError("LDAD predictions must match the recorded per-interval action sequence")
+            output["ldad_loss"] = torch.nn.functional.mse_loss(predicted_actions.float(), target_actions.float())
     if cfg.loss.sigreg.weight > 0:
         output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
         output["loss"] = output["loss"] + cfg.loss.sigreg.weight * output["sigreg_loss"]
@@ -192,9 +193,11 @@ def configure_training_objective(cfg, model):
     ):
         raise ValueError("Action prediction requires num_preds=1 and an action_predictor")
     if objective == "delta_jepa":
-        if cfg.num_preds != 1 or model.ldad is None or model.action_predictor is not None:
-            raise ValueError("Delta-JEPA requires one-step prediction and the LDAD model")
-        if model.ldad.horizon != cfg.data.dataset.frameskip:
+        if cfg.num_preds != 1 or model.action_predictor is not None:
+            raise ValueError("Delta-JEPA requires one-step prediction without a learned-action decoder")
+        if cfg.loss.ldad.weight > 0 and model.ldad is None:
+            raise ValueError("A positive LDAD weight requires a latent difference action decoder")
+        if model.ldad is not None and model.ldad.horizon != cfg.data.dataset.frameskip:
             raise ValueError("The LDAD query count must match the action interval between observed frames")
         if min(cfg.loss.ldad.weight, cfg.loss.sigreg.weight) < 0:
             raise ValueError("Delta-JEPA loss weights must be nonnegative")

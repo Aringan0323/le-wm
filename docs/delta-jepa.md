@@ -35,6 +35,22 @@ The native runner writes into `$LEWM_ROOT/experiments`. Each run contains a plan
 
 ## Windows dashboard and queue
 
+### Shared-batch training
+
+The shared trainer keeps all three models on one GPU. It transfers one batch and performs three independent optimizer updates in sequence, releasing each model's gradients and intermediate activations before the next update. The zero-LDAD control omits the decoder completely. The two positive-weight members have separate decoders. All members have their own action-conditioned forward predictor, optimizer, scheduler, stochastic state and loss records.
+
+From an activated WSL checkout, create a fresh group and start it:
+
+```bash
+GROUP="$LEWM_ROOT/experiments/episode50-delta-shared-20261110-01"
+python scripts/prepare_delta_group.py --experiment-dir "$GROUP" --manifest-dir "$SPLIT" --epochs 50
+bash "$GROUP/run.sh"
+```
+
+The dashboard launcher for a fresh group is `tools/desktop/Start-DeltaGroup.ps1`. It uses the active experiment's sealed split after the old run has completed or been cancelled. One Pause request checkpoints all three models at the same committed batch. Resume restores this common generation. The live group counter advances once after updating all three models. `gpu-telemetry.csv` records device-wide samples and `gpu-telemetry.json` gives a rolling utilization average and a training ETA. Held-out evaluation for each model follows training.
+
+### Sequential queue
+
 On the configured desktop, `tools/desktop/Open-Training-Dashboard.cmd` opens the dashboard at <http://127.0.0.1:8765/>. It supports pause/resume, live test metrics, loss curve toggles and encoder spread. `Queue-DeltaSweep.ps1 -Epochs 50` stages the same three runs behind the experiment in the active pointer. Add `-Planning` to include the planning benchmark. The desktop queue and standalone command are alternative launchers for the same experiment directories.
 
 Desktop helpers read the pointer at `%LEWM_DESKTOP_ROOT%\lewm-wsl\active-experiment.json`. The default desktop root is the current user's Desktop/AI directory. Set `LEWM_DISTRO` and `LEWM_WSL_REPO` to override Ubuntu-24.04 and the WSL checkout location. In WSL, set `LEWM_HOST_ROOT` to the corresponding mounted desktop root when using a nondefault installation. Datasets, private configuration, reference outputs and model weights are local runtime assets.

@@ -106,6 +106,7 @@ def audit(args):
     manifest_sha = manifest['manifest_sha256']
     epochs = getattr(args, 'expected_epochs', 1)
     scheduled = args.expected_objective == 'delta_jepa'
+    has_ldad = scheduled and getattr(args, 'expected_ldad_decoder_enabled', True)
     assert isinstance(epochs, int) and epochs >= 1 and (scheduled or epochs == 1)
     windows_per_epoch = manifest['counts']['train']['windows']
     expected_windows = epochs * windows_per_epoch
@@ -204,6 +205,8 @@ def audit(args):
     assert cfg.trainer.get('limit_val_batches', 0) == 0
     if scheduled:
         assert cfg.loss.ldad.weight == args.expected_ldad_weight and cfg.loss.sigreg.weight == args.expected_sigreg_weight
+        assert (cfg.model.get('ldad') is not None) == has_ldad
+        assert any(k.startswith('model.ldad.') for k in checkpoint['state_dict']) == has_ldad
         assert (cfg.loss.sigreg.weight > 0) == any(k.startswith('sigreg.') for k in checkpoint['state_dict'])
     elif args.expected_objective == 'mse_only':
         assert cfg.loss.get('sigreg') is None and cfg.loss.get('action_prediction') is None
@@ -219,7 +222,7 @@ def audit(args):
     model = hydra.utils.instantiate(cfg.model)
     fresh_state = model.state_dict()
     fresh_full_hash = state_dict_sha256(fresh_state)
-    exclusions = ('action_predictor.', 'ldad.') if scheduled else ('action_predictor.',)
+    exclusions = ('action_predictor.', 'ldad.') if has_ldad else ('action_predictor.',)
     assert initialization['shared_state_excluded_prefixes'] == list(exclusions)
     fresh_shared_hash = state_dict_sha256(fresh_state, exclude_prefixes=exclusions)
     assert fresh_full_hash == initialization['state_sha256'], 'Recorded initialization was not the declared fresh model'
@@ -305,7 +308,8 @@ def audit(args):
     metrics = {}
     loss_fields = ['fit/loss', 'fit/pred_loss']
     if scheduled:
-        loss_fields.append('fit/ldad_loss')
+        if has_ldad:
+            loss_fields.append('fit/ldad_loss')
         if cfg.loss.sigreg.weight > 0:
             loss_fields.append('fit/sigreg_loss')
     elif args.expected_objective != 'mse_only':
@@ -314,6 +318,8 @@ def audit(args):
     with metrics_path.open(newline='') as stream:
         reader = csv.DictReader(stream)
         assert reader.fieldnames and not any(n.startswith('validate/') for n in reader.fieldnames)
+        if scheduled:
+            assert ('fit/ldad_loss' in reader.fieldnames) == has_ldad
         for row_count, row in enumerate(reader, 1):
             if native_checkpoint:
                 assert int(row['step']) == row_count and int(row['epoch']) == (row_count - 1) // epoch_steps

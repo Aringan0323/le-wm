@@ -99,7 +99,8 @@ def delta_gradient_evidence(model, decoder_enabled):
         parameters = [p for name, p in model.named_parameters() if p.requires_grad and name.startswith("ldad.") == decoder]
         gradients = [p.grad for p in parameters if p.grad is not None]
         required = not decoder or decoder_enabled
-        if not parameters or len(gradients) != (len(parameters) if required else 0):
+        absent_decoder = decoder and not decoder_enabled and getattr(model, "ldad", None) is None
+        if (not parameters and not absent_decoder) or len(gradients) != (len(parameters) if required else 0):
             raise ValueError(f"Unexpected first-step gradient coverage for {label}")
         norm = torch.stack([g.detach().norm().float() for g in gradients]).norm().item() if gradients else 0.0
         if not math.isfinite(norm) or (required and norm == 0):
@@ -210,7 +211,7 @@ def _train(cfg):
         metric_names += ["fit/sigreg_loss"]
     if objective in ("action_prediction", "combined"):
         metric_names += ["fit/action_loss", "fit/latent_std", "fit/action_embedding_std", "fit/predicted_action_std"]
-    if objective == "delta_jepa":
+    if objective == "delta_jepa" and model.ldad is not None:
         metric_names.append("fit/ldad_loss")
     if tracks_cross_example_latents(cfg):
         metric_names.extend("fit/" + name for name in CROSS_EXAMPLE_FIELDS)

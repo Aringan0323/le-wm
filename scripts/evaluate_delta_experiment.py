@@ -7,6 +7,7 @@ import numpy as np
 
 from audit_combined_experiment import check, read_json
 from delta_sweep_config import VARIANTS
+from delta_group_layout import model_name, sibling
 from evaluate_combined_experiment import (
     PRECISIONS, add_candidate_reference, publish_results, score_candidate,
 )
@@ -39,13 +40,15 @@ def verified_split(experiment):
     return bundle, dict(zip(map(int, episode_ids), map(int, counts)))
 
 
-def delta_checkpoint(variant, experiment, storage, canonical_hash):
+def delta_checkpoint(variant, experiment, storage, canonical_hash, group=None):
     audit = read_json(experiment / "runs" / variant.label / "final-audit.json")
     check(audit["passed"] and audit["audit"]["objective"] == variant.objective, "Missing passing Delta-JEPA audit")
     record = audit["audit"]
-    folder = storage / "checkpoints" / variant.model
+    name = model_name(experiment, variant, group)
+    folder = storage / "checkpoints" / name
     config_path = folder / "config.yaml"
     cfg = yaml.safe_load(config_path.read_text())
+    check(cfg["output_model_name"] == name, "Saved configuration labels another model")
     manifest = (experiment / "manifest.json").resolve()
     check(record["manifest_sha256"] == cfg["episode_manifest_sha256"] == canonical_hash
           and Path(cfg["episode_manifest"]).resolve() == manifest, "Wrong split for final model")
@@ -64,11 +67,19 @@ def delta_checkpoint(variant, experiment, storage, canonical_hash):
                for key, path in files.items()}
     check(details["weights"]["sha256"] == record["export"]["weights_file_sha256"],
           "Final Delta-JEPA weights have changed since training audit")
-    return {"name": variant.model, "files": details, "epoch": final_epoch,
+    if group is not None:
+        check(record["group_commit"]["group_record_sha256"] == read_json(group / "group-checkpoint.json")["record_sha256"]
+              and final_epoch == int(read_json(experiment / "plan.json")["epochs"]),
+              "Evaluation does not identify the audited final group generation")
+        has_ldad = variant.ldad_weight > 0
+        check((cfg["model"].get("ldad") is not None) == has_ldad
+              and record["delta_objective"]["ldad_decoder_enabled"] is has_ldad,
+              "Group control/decoder architecture differs from its audited model")
+    return {"name": name, "files": details, "epoch": final_epoch,
             "episode_manifest": str(manifest), "episode_manifest_sha256": canonical_hash}
 
 
-def references(experiment, variant):
+def references(experiment, variant, group=None):
     bundle, counts = verified_split(experiment)
     plan = {
         "protocol": PROTOCOL, "test_clip_order_sha256": TEST_ORDER_SHA256,
@@ -94,10 +105,26 @@ def references(experiment, variant):
         for earlier in VARIANTS.values():
             if earlier.label == variant.label:
                 break
-            sibling = experiment.parent / earlier.experiment.name
-            if (sibling / "evaluation" / "results.json").is_file():
-                paths[earlier.label] = sibling
+            other_dir = sibling(experiment, earlier, group)
+            if group is not None or (other_dir / "evaluation" / "results.json").is_file():
+                paths[earlier.label] = other_dir
+    if group is not None:
+        expected = {}
+        for earlier in VARIANTS.values():
+            if earlier.label == variant.label:
+                break
+            expected[earlier.label] = (group / "members" / earlier.label).resolve(strict=True)
+        check({label: path.resolve(strict=True) for label, path in paths.items()} == expected,
+              "Group evaluation must compare exactly the completed earlier members of its own group")
     for label, path in paths.items():
+        if group is not None:
+            other = VARIANTS[label]
+            identity = read_json(path / "evaluation" / "evaluation-plan.json")["plan"]["checkpoints"][label]
+            other_audit = read_json(path / "runs" / label / "final-audit.json")
+            check(other_audit["passed"] and identity["name"] == model_name(path, other, group)
+                  and identity["files"]["weights"]["sha256"] == other_audit["audit"]["export"]["weights_file_sha256"]
+                  and other_audit["audit"]["group_commit"]["group_record_sha256"] == read_json(group / "group-checkpoint.json")["record_sha256"],
+                  "Sibling evaluation does not match its audited group export")
         add_candidate_reference(data, path, label)
     return data
 
@@ -128,16 +155,22 @@ def report(experiment, result):
     temporary.replace(path)
 
 
-def evaluate(experiment, variant):
+def evaluate(experiment, variant, group=None):
+    planned_name = model_name(experiment, variant, group)
     def checkpoint_reader(storage, name, manifest, manifest_hash, objective):
-        check(name == variant.model and manifest == experiment / "manifest.json" and objective == variant.objective,
+        check(name == planned_name and manifest == experiment / "manifest.json" and objective == variant.objective,
               "Unexpected model or split requested")
-        return delta_checkpoint(variant, experiment, storage, manifest_hash)
+        return delta_checkpoint(variant, experiment, storage, manifest_hash, group)
 
-    result = score_candidate(experiment, variant.model, variant.label, variant.objective,
-                             references(experiment, variant), phase_runner=score_with_variation,
+    result = score_candidate(experiment, planned_name, variant.label, variant.objective,
+                             references(experiment, variant, group), phase_runner=score_with_variation,
                              entrypoint=Path(__file__), checkpoint_reader=checkpoint_reader)
     result["variant"] = variant.label
+    if group is not None:
+        result["group_root"] = str(group)
+        result["group_record_sha256"] = read_json(group / "group-checkpoint.json")["record_sha256"]
+        result["model_name"] = planned_name
+        result["ldad_decoder_enabled"] = variant.ldad_weight > 0
     result["loss_weights"] = {"next_embedding_mse": 1.0, "ldad": variant.ldad_weight, "sigreg": variant.sigreg_weight}
     result["test_latent_variation"] = {
         p: read_variation(experiment / "evaluation" / "phases" / f"{variant.label}--{p}", result["models"][variant.label][p])
@@ -150,6 +183,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", required=True, choices=VARIANTS)
     parser.add_argument("--experiment-dir", type=Path)
+    parser.add_argument("--group-root", type=Path)
     args = parser.parse_args()
     variant = VARIANTS[args.variant]
-    evaluate((args.experiment_dir or variant.experiment).resolve(strict=True), variant)
+    evaluate((args.experiment_dir or variant.experiment).resolve(strict=True), variant,
+             args.group_root.resolve(strict=True) if args.group_root else None)

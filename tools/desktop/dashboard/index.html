@@ -51,6 +51,8 @@ const singleModels=new Set([...combinedModels,...deltaModels,"mse_only","action_
 const spreadModels=new Set([...deltaModels,"mse_only","combined_a100","action_w50"]);
 const modelColors={sigreg:"#2563eb",action_predictor:"#dc7633",combined:"#067769",mse_only:"#8851ad",combined_s06:"#b24768",combined_s03:"#857013",combined_a100:"#374151",action_w50:"#087ea1",delta_l0_s09:"#524b9d",delta_l50_s09:"#9f4322",delta_l50_s0:"#257631"};
 function phaseLabel(p){
+  if(p==="train_shared")return "Train three models";
+  if(p?.startsWith("evaluate_")&&deltaModels.has(p.slice(9)))return "Test "+(current?.models?.find(m=>m.key===p.slice(9))?.label||modelLabels[p.slice(9)]);
   const match=/^(train|audit)_(.+)$/.exec(p||"");
   if(match&&modelLabels[match[2]])return (match[1]==="train"?"Train ":"Audit ")+modelLabels[match[2]];
   return ({evaluate_next_embedding:"Evaluate test set",plan_delta:"Evaluate planning",evaluate_planning:"Evaluate planning",complete:"Complete",starting:"Starting"})[p]||title(p);
@@ -59,7 +61,7 @@ function notice(message){$("notice").textContent=message||"";$("notice").style.d
 function modelCard(m){const p=m.progress||{},steps=Number(p.optimizer_steps)||0,total=Number(p.expected_steps)||0,percent=total?100*steps/total:0,color=modelColors[m.key]||"#2563eb",cp=m.checkpoint||{},state=m.state==="pending"?"waiting":m.state;
 const extraFields=combinedModels.has(m.key)?[["SIGReg loss","sigreg_loss"],["Action prediction loss","action_loss"],["Total loss","loss"]]:
   m.key==="action_w50"?[["Action MSE (unweighted)","action_loss"],["Total loss","loss"]]:
-  deltaModels.has(m.key)?[[m.key==="delta_l0_s09"?"LDAD MSE (diagnostic only)":"LDAD MSE (unweighted)","ldad_loss"],
+  deltaModels.has(m.key)?[...(m.ldad_enabled===false?[]:[[m.key==="delta_l0_s09"?"LDAD MSE (diagnostic only)":"LDAD MSE (unweighted)","ldad_loss"]]),
     ...(m.key==="delta_l50_s0"?[]:[["SIGReg loss","sigreg_loss"]]),["Total loss","loss"]]:[];
 const epoch=p.epochs>1?"Epoch "+count(p.current_epoch||1)+" / "+count(p.epochs)+" · ":"";
 const extra=extraFields.length?'<div class="model-grid aux-metrics">'+extraFields.map(([label,key])=>'<div><label>'+label+'</label><strong>'+loss(m.last_losses?.[key])+'</strong></div>').join("")+'</div>':"";
@@ -78,14 +80,15 @@ const isVisible=(model,field)=>typeof choices[model+"."+field]==="boolean"?choic
 function persistChoices(){try{localStorage.setItem(preferenceKey,JSON.stringify(choices));}catch(_){}}
 if(typeof choices.logScale==="boolean"){logScaleChosen=true;$("logScale").checked=choices.logScale;}
 if(typeof choices.matchSteps==="boolean")$("matchSteps").checked=choices.matchSteps;
+const fieldsFor=m=>(curveFields[m.key]||[]).filter(f=>f!=="ldad_loss"||m.ldad_enabled!==false);
 function syncCurveControls(models){
-  const panel=$("curveControls"),signature=models.map(m=>m.key).join("|");
+  const panel=$("curveControls"),signature=models.map(m=>m.key+":"+fieldsFor(m).join(",")).join("|");
   if(panel.dataset.models!==signature){
     panel.dataset.models=signature;
     const fields=Object.keys(fieldLabels).filter(f=>f!=="ldad_loss"||models.some(m=>deltaModels.has(m.key)));
     panel.innerHTML='<table aria-label="Visible training curves"><thead><tr><th scope="col">Visible curves</th>'+
       ["Prediction MSE","Total","SIGReg","Encoded action","Raw LDAD"].slice(0,fields.length).map(v=>'<th scope="col">'+v+'</th>').join("")+'</tr></thead><tbody>'+
-      models.map(m=>'<tr><th scope="row">'+esc(m.label)+'</th>'+fields.map(field=>(curveFields[m.key]||[]).includes(field)?
+      models.map(m=>'<tr><th scope="row">'+esc(m.label)+'</th>'+fields.map(field=>fieldsFor(m).includes(field)?
         '<td><input type="checkbox" data-model="'+esc(m.key)+'" data-field="'+field+'" aria-label="'+esc(m.label+" "+fieldLabels[field])+'"></td>':'<td>—</td>').join("")+'</tr>').join("")+'</tbody></table>';
   }
   const inputs=[...panel.querySelectorAll("input[data-field]")];
@@ -116,6 +119,11 @@ function visiblePoints(points,xmax,width){
     if(p[1]<low[1])low=p;if(p[1]>high[1])high=p;last=p;}
   flush();return result;
 }
+function currentLoggedStep(d){
+  const models=d.models||[];
+  if(d.shared_batch)return Math.min(...models.map(m=>m.metrics?.points?.at(-1)?.step||0),d.group_progress?.optimizer_steps??Infinity);
+  return models.length===1?(models[0].metrics?.points?.at(-1)?.step||0):0;
+}
 function drawChart(){
   if(!current)return;
   const active=current.models||[],refs=current.reference_training_models||[],queued=current.queued_training_models||[];
@@ -123,15 +131,15 @@ function drawChart(){
   if(comparing!==comparisonChart&&!logScaleChosen)$("logScale").checked=comparing;
   comparisonChart=comparing;
   $("matchStepsLabel").style.display=comparing?"":"none";
-  const log=$("logScale").checked, models=[...refs,...active,...queued],livePoints=live?.metrics?.points||[];
-  const currentStep=livePoints.length?livePoints[livePoints.length-1].step:0;
+  const log=$("logScale").checked, models=[...refs,...active,...queued];
+  const currentStep=currentLoggedStep(current);
   const limit=comparing&&$("matchSteps").checked?currentStep:Infinity;
   const label=m=>m.label+(queued.includes(m)?" · Queue "+m.queue_position+" · "+title(m.state||"queued"):refs.includes(m)?" · prior run":comparing?" · current run":"");
   $("chartLegend").innerHTML=models.map(m=>'<span><i class="dot" style="background:'+modelColors[m.key]+'"></i>'+esc(label(m))+'</span>').join("");
   syncCurveControls(models);
   const series=[];let xmax=1,ymin=log?Infinity:0,ymax=-Infinity;
   for(const m of models){
-    const fields=(curveFields[m.key]||[]).filter(field=>isVisible(m.key,field));
+    const fields=fieldsFor(m).filter(field=>isVisible(m.key,field));
     for(const field of fields){const data=[];
       for(const p of m.metrics?.points||[]){if(p.step>limit)break;
         if(!num(p[field])||(log&&p[field]<=0))continue;
@@ -142,10 +150,10 @@ function drawChart(){
     }
   }
   const sampled=models.some(m=>(m.metrics?.sample_stride||1)>1);
-  const historical=live&&deltaModels.has(live.key)&&refs.some(m=>m.epochs===1);
+  const historical=(current.shared_batch||deltaModels.has(live?.key))&&refs.some(m=>m.epochs===1);
   const note=comparing?((historical?"Earlier one-epoch runs share the first epoch’s window order. ":"Same training windows and optimizer-step axis. ")+
     (limit<Infinity?"All curves stop at the current run’s latest logged step ("+count(currentStep)+").":
-    "Prior runs show their full history; the current curve ends at step "+count(currentStep)+"."))
+    "Prior runs show their full history. "+(current.shared_batch?"The shared runs have logged through step ":"The current curve ends at step ")+count(currentStep)+"."))
     :models.some(m=>m.metrics?.truncated)?"Showing recent history. The original CSV files retain the full records.":"Training metrics update as they are written.";
   $("chartNote").textContent=note+(sampled?" Long curves show sampled optimizer steps across their full history.":"");
   if(!series.length){$("chartReadout").hidden=true;$("chart").innerHTML='<div class="chart-empty">No logged points for the selected curves and step range.</div>';return;}
@@ -168,7 +176,7 @@ function drawChart(){
     const path=pts.map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+","+y(p[1]).toFixed(2)).join(" ");
     const color=modelColors[m.key]||"#2563eb";
     svg+='<path data-model="'+esc(m.key)+'" data-metric="'+field+'" data-last-step="'+last[0]+'" d="'+path+'" fill="none" stroke="'+color+'" stroke-width="'+(field==="pred_loss"?1.9:1.3)+'" stroke-linejoin="round"'+(dashes[field]?' stroke-dasharray="'+dashes[field]+'"':"")+'><title>'+esc(label(m))+' · '+fieldNames[field]+'</title></path>';
-    if(data.length===1||(comparing&&m===live&&field==="pred_loss"))
+    if(data.length===1||(comparing&&active.includes(m)&&field==="pred_loss"))
       svg+='<circle cx="'+x(last[0])+'" cy="'+y(last[1])+'" r="3.5" fill="'+color+'" stroke="white"><title>Step '+count(last[0])+' · '+loss(log?Math.pow(10,last[1]):last[1])+'</title></circle>';
   }
   $("chart").innerHTML=svg+'<text x="'+(W-R)+'" y="'+(H-1)+'" text-anchor="end" fill="#6c788a" font-size="10">Optimizer step</text></svg>';
@@ -203,8 +211,7 @@ function drawLatentChart(d){
   const hasSpread=m=>m.metrics?.points?.some(p=>num(p.latent_cross_example_rms_std)&&p.latent_cross_example_count>1);
   const models=[...refs.filter(hasSpread),...[...active,...queued].filter(m=>spreadModels.has(m.key)||hasSpread(m))];
   $("latentPanel").hidden=!models.length;if(!models.length)return;
-  const live=active.length===1?active[0]:null,livePoints=live?.metrics?.points||[];
-  const limit=live&&refs.length&&$("matchSteps").checked?(livePoints.at(-1)?.step||0):Infinity;
+  const limit=(active.length===1||d.shared_batch)&&refs.length&&$("matchSteps").checked?currentLoggedStep(d):Infinity;
   const curves=models.map(model=>({model,points:(model.metrics?.points||[])
     .filter(p=>p.step<=limit&&num(p.latent_cross_example_rms_std)&&p.latent_cross_example_rms_std>=0&&p.latent_cross_example_count>1)
     .map(p=>[p.step,p.latent_cross_example_rms_std])}));
@@ -240,7 +247,7 @@ function drawLatentChart(d){
 function renderTest(d) {
   const rows = d.evaluation_phases || [];
   const test = d.counts?.test || {};
-  const labels = modelLabels;
+  const labels = {...modelLabels,...Object.fromEntries((d.models||[]).map(m=>[m.key,m.label]))};
   const states = {waiting: "Queued", running: "Live", complete: "Final", paused: "Paused", interrupted: "Interrupted"};
   const active = rows.find(row => row.state === "running");
   const finished = rows.filter(row => row.state === "complete").length;
@@ -310,7 +317,7 @@ function renderReferenceScores(reference) {
 function positionTestPanel(d) {
   const panel = document.querySelector(".test-panel");
   const model = d.models?.length === 1 ? d.models[0].key : null;
-  const training = singleModels.has(model) && ["starting","train_"+model,"audit_"+model].includes(d.status?.phase);
+  const training = d.shared_batch && d.status?.phase==="train_shared" || singleModels.has(model) && ["starting","train_"+model,"audit_"+model].includes(d.status?.phase);
   if (training && $("latentPanel").nextElementSibling !== panel) $("latentPanel").after(panel);
   if (!training && panel.nextElementSibling !== $("models")) $("models").before(panel);
 }
@@ -323,7 +330,25 @@ $("pause").disabled=!d.controls_available||state!=="running"||pending||controlBu
 let message=resuming?"Resume requested. Waiting for the training process to restore its checkpoint.":pending?"Pause requested. Training is still running while it finishes the current work and saves a checkpoint.":state==="paused"?"Paused. The saved training state will be used when you resume.":state==="failed"?(status.error||"The run stopped with an error. See the activity log."):"";if(job.status==="failed")message="Control request failed: "+(job.error||JSON.stringify(job.response||{}));if(d.collector_error)message="Progress could not be refreshed: "+d.collector_error;notice(message);
 $("phase").textContent=phaseLabel(status.phase);$("phaseDetail").textContent=state==="paused"?"Saved state is paused":status.phase_started_utc?"Phase started "+new Date(status.phase_started_utc).toLocaleTimeString():"Waiting for the pipeline";const active=(d.models||[]).find(m=>m.active),rate=state==="paused"?{windows_per_second:0,steps_per_second:0,basis:"paused"}:state==="running"&&active?(active.throughput||{}):{};$("throughput").textContent=num(rate.windows_per_second)?rate.windows_per_second.toFixed(1)+" /s":"—";$("throughputDetail").textContent=state==="paused"?"Paused · no optimizer updates":num(rate.steps_per_second)?rate.steps_per_second.toFixed(2)+" steps/s · "+rate.basis+" windows/s":"Training windows per second";
 const gpu=d.gpu||{};$("gpuUtil").textContent=num(gpu.utilization)?Math.round(gpu.utilization)+"%":"—";$("gpuMeter").style.width=(gpu.utilization||0)+"%";$("gpuName").textContent=gpu.name||"GPU telemetry unavailable";$("gpuMemory").textContent=num(gpu.memory_used_mib)?(gpu.memory_used_mib/1024).toFixed(1)+" GB":"—";$("gpuMemoryDetail").textContent=num(gpu.memory_total_mib)?"of "+(gpu.memory_total_mib/1024).toFixed(1)+" GB"+(num(gpu.power_watts)?" · "+Math.round(gpu.power_watts)+" W":""):"Allocated device memory";
-$("models").innerHTML=(d.models||[]).map(modelCard).join("");$("updated").textContent=status.updated_utc?"Report "+new Date(status.updated_utc).toLocaleTimeString():"";$("activity").textContent=status.error||(pending?"Saving progress before pausing.":state==="complete"?((d.models||[]).length===1?"Training and held-out evaluation are complete.":"Both training runs and the held-out comparison are complete."):state==="paused"?"Resume when you are ready to continue.":phaseLabel(status.phase)+".");$("log").textContent=d.log_tail||"No log output yet.";$("experimentLabel").textContent=d.experiment_path||"Local monitor · 127.0.0.1:8765";renderTest(d);drawChart();drawLatentChart(d);}
+if(d.shared_batch&&status.phase==="train_shared"){
+  const telemetry=d.group_telemetry||{},sampled=Date.parse(telemetry.sampled_utc||"");
+  const recent=state==="running"&&Number.isFinite(sampled)&&Date.now()-sampled<120000;
+  const speed=recent&&num(telemetry.group_steps_per_second)?telemetry.group_steps_per_second:rate.steps_per_second;
+  if(state==="running"&&num(speed)){
+    $("throughput").textContent=speed.toFixed(2)+" steps/s";
+    $("throughputDetail").textContent="One update per model per shared batch";
+  }
+  const eta=recent&&num(telemetry.eta_seconds)?telemetry.eta_seconds:active?.recent_eta_seconds;
+  if(state==="running"&&num(eta))$("phaseDetail").textContent="Estimated training time remaining · "+duration(eta);
+  if(recent&&num(telemetry.gpu_util_percent_mean)){
+    const span=num(telemetry.samples_window_seconds)?duration(telemetry.samples_window_seconds):"sample window";
+    const range=num(telemetry.gpu_util_percent_min)&&num(telemetry.gpu_util_percent_max)?" ("+Math.round(telemetry.gpu_util_percent_min)+"–"+Math.round(telemetry.gpu_util_percent_max)+"%)":"";
+    $("gpuName").textContent=(gpu.name||"GPU")+" · "+Math.round(telemetry.gpu_util_percent_mean)+"% average over "+span+range;
+  }
+  if(recent&&num(telemetry.memory_used_mib_peak))$("gpuMemoryDetail").textContent=(telemetry.memory_used_mib_peak/1024).toFixed(1)+" GB peak"+
+    (num(telemetry.memory_free_mib_min)?" · "+(telemetry.memory_free_mib_min/1024).toFixed(1)+" GB minimum free":"");
+}
+$("models").innerHTML=(d.models||[]).map(modelCard).join("");$("updated").textContent=status.updated_utc?"Report "+new Date(status.updated_utc).toLocaleTimeString():"";$("activity").textContent=status.error||(pending?"Saving progress before pausing.":state==="complete"?((d.models||[]).length===1?"Training and held-out evaluation are complete.":(d.shared_batch?"All three models and their held-out evaluations are complete.":"Both training runs and the held-out comparison are complete.")):state==="paused"?"Resume when you are ready to continue.":phaseLabel(status.phase)+".");$("log").textContent=d.log_tail||"No log output yet.";$("experimentLabel").textContent=d.experiment_path||"Local monitor · 127.0.0.1:8765";renderTest(d);drawChart();drawLatentChart(d);}
 async function poll(){
   try{
     const previous=current?.reference_training_token;
