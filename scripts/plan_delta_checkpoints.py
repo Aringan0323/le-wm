@@ -219,7 +219,7 @@ def evaluate(root, trajectories, seed, prepare_only):
             result = {**publish("complete"),"passed":True,"plan_sha256":fingerprint,"trials_sha256":json_hash(spec),
                       "protocol":plan["protocol"],"test_episodes":trajectories,"finished_utc":now(),
                       "checkpoint_record_sha256":record["record_sha256"],"model_states_unchanged":True,
-                      "interpretation":"Intermediate checkpoints, one planner seed, twenty paired held-out tasks; full paper-scale reproduction is not established."}
+                      "interpretation":f"Intermediate checkpoints, one planner seed, {trajectories} paired held-out tasks; full paper-scale reproduction is not established."}
             write_json(folder / "results.json", result)
             print(json.dumps(result),flush=True)
         except BaseException as exc:
