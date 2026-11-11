@@ -51,6 +51,26 @@ def tail(path):
         return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","","\n".join(text.splitlines()[-65:]))
     except OSError: return ""
 
+def replay_asset(experiment, relative):
+    """Resolve only JSON/PNG assets beneath the selected planning replay directory."""
+    if not isinstance(relative, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", relative):
+        raise ValueError("Invalid replay asset path")
+    if any(part in ("", ".", "..") for part in relative.split("/")):
+        raise ValueError("Invalid replay asset path")
+    if Path(relative).suffix.lower() not in (".json", ".png"):
+        raise ValueError("Unsupported replay asset")
+    selected = read_json(experiment / "planning" / "active.json").get("directory")
+    if not isinstance(selected, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", selected):
+        raise ValueError("No active planning replay")
+    planning = (experiment / "planning").resolve(strict=True)
+    directory = (planning / selected).resolve(strict=True)
+    root = (directory / "replay").resolve(strict=True)
+    target = (root / relative).resolve(strict=True)
+    if directory.parent != planning or root.parent != directory or not target.is_relative_to(root) or not target.is_file():
+        raise ValueError("Replay asset is outside the selected replay directory")
+    return target
+
+
 def planning_snapshot(experiment, linux_experiment=None):
     directory = experiment / "planning"
     selected = read_json(directory / "active.json").get("directory")
@@ -71,7 +91,13 @@ def planning_snapshot(experiment, linux_experiment=None):
                     and any(Path(arg).name in ("plan_delta_checkpoints.py", "plan_delta_episodes.py") for arg in args))
         except (OSError, UnicodeDecodeError, ValueError, IndexError):
             pass
-    return {**planning, "process_live": live, "directory": str(directory)}
+    try:
+        replay_asset(experiment, "manifest.json")
+        replay_available = True
+    except (OSError, ValueError, RuntimeError):
+        replay_available = False
+    return {**planning, "process_live": live, "directory": str(directory),
+            "replay_available": replay_available, "replay_url": "/replay" if replay_available else None}
 
 
 def evaluation_phases(directory, status, progress, results, test_windows, models=PAIRED_MODELS):
@@ -650,7 +676,7 @@ def handler_for(monitor,html_path=HTML_PATH):
             port=self.server.server_address[1]
             return self.headers.get("Host","") in ("127.0.0.1:"+str(port),"localhost:"+str(port))
         def send(self,status,content,mime="application/json; charset=utf-8"):
-            body=content.encode("utf-8") if isinstance(content,str) else json.dumps(content,allow_nan=False).encode()
+            body=content if isinstance(content,bytes) else content.encode("utf-8") if isinstance(content,str) else json.dumps(content,allow_nan=False).encode()
             self.send_response(status); self.send_header("Content-Type",mime); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.end_headers(); self.wfile.write(body)
         def do_GET(self):
             url = urllib.parse.urlsplit(self.path)
@@ -658,6 +684,18 @@ def handler_for(monitor,html_path=HTML_PATH):
             elif self.path in ("/","/index.html"):
                 try: self.send(200,Path(html_path).read_text(encoding="utf-8"),"text/html; charset=utf-8")
                 except OSError: self.send(503,{"error":"Dashboard HTML is missing"})
+            elif url.path == "/replay":
+                try: self.send(200,Path(html_path).with_name("replay.html").read_text(encoding="utf-8"),"text/html; charset=utf-8")
+                except OSError: self.send(404,{"error":"Replay viewer is not available"})
+            elif url.path == "/api/replaymanifest" or url.path.startswith("/replay-assets/"):
+                try:
+                    relative = "manifest.json" if url.path == "/api/replaymanifest" else urllib.parse.unquote(url.path[len("/replay-assets/"):], errors="strict")
+                    pointer = read_json(monitor.pointer)
+                    if not pointer.get("windows_path"):
+                        raise ValueError("No active experiment")
+                    asset = replay_asset(Path(pointer["windows_path"]), relative)
+                    self.send(200,asset.read_bytes(),"image/png" if asset.suffix.lower() == ".png" else "application/json; charset=utf-8")
+                except (OSError, ValueError, RuntimeError): self.send(404,{"error":"Replay asset is not available"})
             elif url.path == "/api/status":
                 tokens = urllib.parse.parse_qs(url.query).get("reference_token", [])
                 self.send(200, monitor.snapshot(tokens[0] if len(tokens) == 1 else None))
@@ -964,12 +1002,75 @@ def test_detached_control_output(root):
         completed.wait(5)
 
 
+def test_replay_routes(root):
+    experiment = root / "experiment"
+    planning = experiment / "planning"
+    directory = planning / "episodes-checkpoint-100"
+    directory.mkdir(parents=True)
+    (planning / "active.json").write_text(json.dumps({"directory": directory.name}))
+    (directory / "results.json").write_text(json.dumps({"status": "complete", "passed": True}))
+    assert not planning_snapshot(experiment)["replay_available"]
+    replay = directory / "replay"
+    frames = replay / "135" / "ground_truth"
+    frames.mkdir(parents=True)
+    manifest = {"episodes": [{"episode": 135}], "checkpoint_step": 100}
+    (replay / "manifest.json").write_text(json.dumps(manifest))
+    image = b"\x89PNG\r\n\x1a\nfixture"
+    (frames / "000000.png").write_bytes(image)
+    outside = root / "secret.json"
+    outside.write_text('{"private":true}')
+    (replay / "private.txt").write_text("not an allowed asset type")
+    snapshot = planning_snapshot(experiment)
+    assert snapshot["replay_available"] and snapshot["replay_url"] == "/replay"
+    pointer = root / "pointer.json"
+    pointer.write_text(json.dumps({"windows_path": str(experiment)}))
+    monitor = Monitor(pointer, root)
+    html = root / "index.html"
+    html.write_text("Dashboard fixture")
+    (root / "replay.html").write_text("Replay viewer fixture")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(monitor, html))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:" + str(server.server_address[1])
+    def missing(path):
+        try:
+            urllib.request.urlopen(url + path, timeout=5)
+            raise AssertionError("Unsafe or absent replay asset was served: " + path)
+        except urllib.error.HTTPError as error:
+            assert error.code == 404
+    try:
+        assert urllib.request.urlopen(url + "/replay", timeout=5).read() == b"Replay viewer fixture"
+        for endpoint in ("/api/replaymanifest", "/replay-assets/manifest.json"):
+            with urllib.request.urlopen(url + endpoint, timeout=5) as response:
+                assert response.headers.get_content_type() == "application/json"
+                assert json.load(response) == manifest
+        with urllib.request.urlopen(url + "/replay-assets/135/ground_truth/000000.png", timeout=5) as response:
+            assert response.headers.get_content_type() == "image/png" and response.read() == image
+        for path in ("../secret.json", "%2e%2e/secret.json", "%252e%252e/secret.json", "135/../manifest.json",
+                     "/secret.json", "C%3a/secret.json", "%5c%5cserver/secret.json", "private.txt", "missing.png"):
+            missing("/replay-assets/" + path)
+        # Exercise actual symlink containment where the platform permits creating them.
+        link = replay / "outside.json"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            missing("/replay-assets/outside.json")
+        (replay / "manifest.json").unlink()
+        missing("/api/replaymanifest")
+        assert not planning_snapshot(experiment)["replay_available"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def self_test():
     with tempfile.TemporaryDirectory(prefix="lewm-dashboard-") as folder:
         root=Path(folder); experiment=root/"experiment"; run=experiment/"runs/sigreg"; run.mkdir(parents=True)
         test_evaluation_phases(root/"phase-fixture")
         test_delta_dashboard(root/"delta-fixture")
         test_detached_control_output(root/"control-fixture")
+        test_replay_routes(root/"replay-fixture")
         (experiment/"status.json").write_text(json.dumps({"status":"running","phase":"train_sigreg"}))
         (experiment/"manifest.json").write_text(json.dumps({"training_order":{"batch_size":32,"steps_per_epoch":11427},"counts":{"train":{"episodes":5000,"windows":365657},"test":{"episodes":3000,"windows":218790}}}))
         (run/"progress.json").write_text(json.dumps({"optimizer_steps":100,"windows_seen":3200,"expected_steps":11427,"elapsed_seconds":20,"last_losses":{"pred_loss":.012}}))
@@ -1168,7 +1269,7 @@ def self_test():
             except urllib.error.HTTPError as error: assert error.code==403
         finally: server.shutdown(); server.server_close()
     print(json.dumps({"passed":True,"checks":["shared progress and ETA, three independent loss histories, checkpoint and six precision passes","three Delta-JEPA models, bounded incremental curves and verified multi-epoch comparisons","ordered queue and all eight historical model histories through promotion","live and historical across-example latent variation","matched reference scores and full training curves",
-        "evaluation phase states and MSE attribution","single-task and continuous-episode planning schemas, process identity and retained history","HTTP status/UI and opt-in reference caching","control token rejection","completed resume permits pause while detached launcher keeps output handles"]}))
+        "evaluation phase states and MSE attribution","single-task and continuous-episode planning schemas, process identity and retained history","HTTP status/UI and opt-in reference caching","control token rejection","replay routes, MIME types, missing manifests and path/symlink containment","completed resume permits pause while detached launcher keeps output handles"]}))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

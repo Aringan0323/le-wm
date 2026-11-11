@@ -73,6 +73,10 @@ def run_episode(model, env, solver, episode, inputs, mean, std, preprocess, devi
         first_distance = float(torch.norm(env.agent_position - env.target_position))
         reached = first_distance < 16.0
         steps = replans = 0
+        trajectory = []
+        start_event = {"event":"zero_action_success" if reached else "goal_start",
+                       "position":actual_start, "target_position":target.astype(float).tolist(),
+                       "cumulative_step":cumulative_steps, "goal_index":index, "goal_step":goal_step}
         distance = first_distance
         if not reached:
             goal = image_embedding(model, inputs["pixels"][goal_row], preprocess, device)
@@ -85,12 +89,22 @@ def run_episode(model, env, solver, episode, inputs, mean, std, preprocess, devi
                   and np.isfinite(actions).all(), "Invalid planned action sequence")
             replans += 1
             for action in actions:
+                pre_position = position(env)
+                commanded = np.asarray(action).astype(float).tolist()
+                applied = np.clip(np.asarray(action, dtype=np.float32), -1, 1).astype(float).tolist()
                 _, _, terminated, truncated, info = env.step(action)
                 steps += 1
                 distance = float(info["distance_to_target"])
                 reached = distance < 16.0
                 check(not truncated and np.isfinite(distance) and bool(terminated) == reached,
                       "Environment success threshold or transition changed")
+                trajectory.append({"action_index":steps - 1,
+                    "cumulative_step_before":cumulative_steps + steps - 1,
+                    "cumulative_step_after":cumulative_steps + steps,
+                    "pre_position":pre_position, "post_position":position(env),
+                    "commanded_action":commanded, "applied_action":applied,
+                    "goal_index":index, "target_position":target.astype(float).tolist(),
+                    "distance_to_target":distance, "success":bool(reached)})
                 if reached or steps == protocol.budget:
                     break
         cumulative_start = cumulative_steps
@@ -100,6 +114,7 @@ def run_episode(model, env, solver, episode, inputs, mean, std, preprocess, devi
                 "actual_end_position":position(env), "initial_distance":first_distance,
                 "final_distance":distance, "success":bool(reached), "zero_action_success":bool(reached and steps == 0),
                 "steps":steps, "replans":replans, "solver_seed":solver_seed,
+                "start_event":start_event, "trajectory":trajectory,
                 "cumulative_steps_before":cumulative_start, "cumulative_steps_after":cumulative_steps}
         tasks.append(task)
         if on_goal is not None:
@@ -107,7 +122,8 @@ def run_episode(model, env, solver, episode, inputs, mean, std, preprocess, devi
     return {"tasks":tasks, "success":all(task["success"] for task in tasks),
             "final_goal_success":tasks[-1]["success"], "physical_steps":cumulative_steps,
             "actual_initial_position":start.astype(float).tolist(), "actual_final_position":position(env),
-            "environment_resets":1}
+            "initial_state":{"position":start.astype(float).tolist(), "cumulative_step":0},
+            "trajectory_schema_version":1, "environment_resets":1}
 
 
 def validate_episode(record, episode, seed, fingerprint, protocol):
@@ -119,6 +135,9 @@ def validate_episode(record, episode, seed, fingerprint, protocol):
     check(len(tasks) == len(episode["goal_steps"]) and outcome["environment_resets"] == 1,
           "Incomplete continuous episode")
     previous_position = outcome["actual_initial_position"]
+    check(outcome["trajectory_schema_version"] == 1
+          and outcome["initial_state"] == {"position":previous_position, "cumulative_step":0},
+          "Missing initial state for replay")
     cumulative = 0
     for index, task in enumerate(tasks):
         check(task["goal_index"] == index and task["goal_step"] == episode["goal_steps"][index]
@@ -135,6 +154,32 @@ def validate_episode(record, episode, seed, fingerprint, protocol):
         for field, a in (("initial_distance", vectors[0]), ("final_distance", vectors[1])):
             check(np.isclose(task[field], np.linalg.norm(a-vectors[2]), rtol=1e-5, atol=1e-5),
                   "Distance does not match recorded actual state")
+        event = {"event":"zero_action_success" if task["zero_action_success"] else "goal_start",
+                 "position":task["actual_start_position"], "target_position":task["target_position"],
+                 "cumulative_step":cumulative, "goal_index":index, "goal_step":task["goal_step"]}
+        check(task["start_event"] == event, "Incorrect goal-start replay event")
+        check(len(task["trajectory"]) == task["steps"], "Replay actions do not cover executed steps")
+        replay_position = task["actual_start_position"]
+        for action_index, frame in enumerate(task["trajectory"]):
+            check(frame["action_index"] == action_index and frame["goal_index"] == index
+                  and frame["target_position"] == task["target_position"]
+                  and frame["cumulative_step_before"] == cumulative + action_index
+                  and frame["cumulative_step_after"] == cumulative + action_index + 1
+                  and frame["pre_position"] == replay_position, "Replay action continuity differs")
+            action_vectors = np.asarray([frame[name] for name in
+                ("pre_position","post_position","commanded_action","applied_action")], dtype=float)
+            check(action_vectors.shape == (4,2) and np.isfinite(action_vectors).all(),
+                  "Invalid finite replay action or state")
+            expected_applied = np.clip(action_vectors[2].astype(np.float32), -1, 1).astype(float)
+            check(np.array_equal(expected_applied,action_vectors[3]), "Applied replay action differs from clipping")
+            distance = float(np.linalg.norm(action_vectors[1]-vectors[2]))
+            check(np.isfinite(frame["distance_to_target"])
+                  and np.isclose(frame["distance_to_target"],distance,rtol=1e-5,atol=1e-5)
+                  and isinstance(frame["success"],bool) and frame["success"] == (frame["distance_to_target"] < 16.0)
+                  and (not frame["success"] or action_index == task["steps"] - 1),
+                  "Invalid replay distance or success boundary")
+            replay_position = frame["post_position"]
+        check(replay_position == task["actual_end_position"], "Replay final state differs")
         expected_replans = (task["steps"] + protocol.horizon*protocol.action_block - 1) // (protocol.horizon*protocol.action_block)
         check(task["replans"] == expected_replans, "Saved replan count differs")
         expected_seed = int(np.random.SeedSequence([seed, episode["episode"], task["goal_step"]]).generate_state(1)[0])
@@ -219,7 +264,9 @@ def evaluate(root, count, seed, prepare_only):
                 "budget_per_goal":protocol.budget, "success_distance_strictly_below":16,
                 "episode_success":"Every scheduled goal succeeds during a single continuous rollout.",
                 "failure_policy":"Continue the next goal from the actual final simulator state.",
-                "resume_unit":"One complete episode.", "endpoints":rendered}
+                "resume_unit":"One complete episode.", "trajectory_schema_version":1,
+                "recorded_actions":"Denormalized commands and the environment's float32 clipping to [-1,1].",
+                "endpoints":rendered}
         fingerprint = json_hash(plan)
         pin_json(folder / "plan.json", {"plan":plan, "fingerprint":fingerprint})
         if prepare_only:

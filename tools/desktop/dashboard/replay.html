@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two-Room episode replay</title>
+<style>
+:root{color-scheme:light;--ink:#19283c;--muted:#63738a;--line:#dce4ee;--bg:#f2f5f9}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,system-ui,sans-serif}
+main{max-width:1100px;margin:auto;padding:25px 24px 38px}header{display:flex;justify-content:space-between;gap:20px;align-items:start}
+h1{font-size:25px;letter-spacing:-.5px;margin:0 0 5px}h2{font-size:15px;margin:0}p{margin:5px 0;color:var(--muted)}
+a{color:#245fbd}button,select,input{font:inherit}button,select{border:1px solid #b9c7d8;border-radius:7px;background:white;color:var(--ink);padding:7px 11px}
+button{cursor:pointer}button:disabled,select:disabled,input:disabled{opacity:.45;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #94bfff;outline-offset:2px}
+#play{background:#245fbd;color:white;border-color:#245fbd;min-width:80px}
+.toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:white;padding:14px;border:1px solid var(--line);border-radius:12px;margin:19px 0 10px}
+.toolbar label{font-size:12px;color:var(--muted)}.timeline{display:flex;align-items:center;gap:15px;margin:11px 0 5px}
+#scrub{flex:1;accent-color:#245fbd;min-width:100px}#time{min-width:155px;font-variant-numeric:tabular-nums;text-align:right}
+.note{font-size:12px;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.panel{background:white;border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:11px;overflow:hidden;padding:14px}
+.panel.recorded{border-top-style:dashed;--accent:#64748b}
+.panelhead{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}
+.badge{font-size:11px;color:#4c627c;background:#edf2f8;border-radius:20px;padding:4px 8px;white-space:nowrap}
+.badge.ended{background:#e5eee8;color:#286746}
+.visual{position:relative;width:min(100%,340px);aspect-ratio:1;margin:auto;background:#f3f6fa;overflow:hidden;border:1px solid #d8e1ec}
+.visual img{display:block;width:100%;height:100%;object-fit:contain}
+.goal{position:absolute;width:20px;height:20px;border:2px dashed #1d5ee5;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 1px white}
+.goal:before,.goal:after{content:"";position:absolute;background:#1d5ee5;top:50%;left:50%;transform:translate(-50%,-50%)}.goal:before{width:8px;height:1px}.goal:after{width:1px;height:8px}
+.details{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-top:12px;font-size:12px}.details p{margin:0;color:var(--ink)}
+.details span{color:var(--muted)}.events{font-size:11px;color:var(--muted);min-height:17px;margin-top:8px}
+#status{padding:20px;text-align:center;background:white;border:1px solid var(--line);border-radius:12px;margin-top:20px}
+footer{margin-top:17px;font-size:11px;color:var(--muted)}[hidden]{display:none!important}
+@media(max-width:650px){main{padding:18px 12px}.grid{grid-template-columns:1fr}header{flex-direction:column;gap:10px}.timeline{gap:8px}#time{font-size:12px;min-width:135px}.toolbar{gap:8px}.visual{width:min(100%,350px)}}
+</style>
+</head>
+<body><main>
+<header><div><h1>Two-Room episode replay</h1><p id="subtitle">Loading recorded and model-controlled trajectories…</p></div><a id="dashboard" href="/">Training dashboard</a></header>
+<div class="toolbar">
+<label for="episode">Episode</label><select id="episode" disabled></select>
+<button id="previous" disabled title="Previous physical step">← Step</button><button id="play" disabled>Play</button><button id="next" disabled title="Next physical step">Step →</button>
+<label for="speed">Speed</label><select id="speed" disabled><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+<label><input id="showGoals" type="checkbox" checked> Goal markers</label><button id="reload">Reload</button>
+</div>
+<div class="timeline"><label for="scrub">Physical step</label><input id="scrub" type="range" min="0" max="0" value="0" disabled><output id="time">0 / 0</output></div>
+<p class="note">All panels use the same physical-step timeline. Each trajectory holds at its own final frame. Blue markers show the current model goal.</p>
+<div id="status" role="status">Waiting for replay data.</div><div id="panels" class="grid" hidden></div>
+<footer>Space to play or pause · ← / → to step · Home / End to jump · 1× plays 10 physical steps per second</footer>
+</main>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const hosted=location.pathname.replace(/\/$/,"")==="/replay";
+const assetBase=hosted?"/replay-assets/":"./";
+const manifestUrl=hosted?"/api/replaymanifest":"./manifest.json";
+$("dashboard").hidden=!hosted;
+const colors={ground_truth:"#64748b",delta_l0_s09:"#6455a6",delta_l50_s09:"#b35a31",delta_l50_s0:"#2d7b61"};
+const eventLabels={goal_start:"Started goal",zero_action_success:"Already within goal tolerance",
+  goal_reached:"Reached goal",goal_budget_exhausted:"Goal budget exhausted"};
+const statusLabels={goal_start:"Goal started",zero_action_success:"Already at goal",moving:"Moving",
+  goal_reached:"Goal reached",goal_budget_exhausted:"Goal budget exhausted",complete:"Complete",recorded:"Recorded"};
+let manifest=null,currentEpisode=null,step=0,playing=false,lastTime=null,accumulator=0,retry=null;
+const views=new Map();
+function element(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;}
+function fmtPosition(value){return Array.isArray(value)?value.map(x=>Number(x).toFixed(1)).join(", "):"—";}
+function fmtAction(value){return Array.isArray(value)?value.map(x=>Number(x).toFixed(2)).join(", "):"—";}
+function imageURL(path){return assetBase+path.split("/").map(encodeURIComponent).join("/");}
+function setPlaying(value){
+  playing=Boolean(value&&currentEpisode);lastTime=null;accumulator=0;
+  $("play").textContent=playing?"Pause":"Play";$("play").setAttribute("aria-pressed",String(playing));
+}
+function makePanels(){
+  views.clear();$("panels").replaceChildren();
+  for(const stream of currentEpisode.streams){
+    const panel=element("article",undefined,"panel"+(stream.kind==="recorded"?" recorded":""));
+    panel.style.setProperty("--accent",colors[stream.key]||"#245fbd");
+    const head=element("div",undefined,"panelhead"),badge=element("span","","badge");
+    head.append(element("h2",stream.label),badge);
+    const visual=element("div",undefined,"visual"),img=element("img"),goal=element("div",undefined,"goal");
+    img.alt=stream.label+" trajectory";img.width=224;img.height=224;goal.title="Current target position";
+    visual.append(img,goal);
+    const details=element("div",undefined,"details");
+    const fields={};
+    for(const key of ["frame","position","goal","distance","progress","action"]){fields[key]=element("p");details.append(fields[key]);}
+    const events=element("div","","events");panel.append(head,visual,details,events);
+    $("panels").append(panel);views.set(stream.key,{badge,img,goal,fields,events});
+  }
+}
+function textField(el,label,value){el.replaceChildren(element("span",label+" "),document.createTextNode(value));}
+function render(){
+  if(!currentEpisode)return;
+  $("scrub").value=step;$("time").textContent=step.toLocaleString()+" / "+currentEpisode.final_step.toLocaleString();
+  $("previous").disabled=step===0;$("next").disabled=step===currentEpisode.final_step;
+  for(const stream of currentEpisode.streams){
+    const ownStep=Math.min(step,stream.final_step),frame=stream.frames[ownStep],view=views.get(stream.key);
+    const ended=step>=stream.final_step,held=step>stream.final_step;
+    const url=imageURL(frame.image);if(view.img.getAttribute("src")!==url)view.img.src=url;
+    view.badge.textContent=held?"Finished · holding":ended?"Final frame":statusLabels[frame.status]||frame.status;
+    view.badge.className="badge"+(ended?" ended":"");
+    textField(view.fields.frame,stream.kind==="recorded"?"Recorded frame":"Executed step",ownStep+" / "+stream.final_step);
+    textField(view.fields.position,"Position",fmtPosition(frame.position));
+    const target=frame.target_position;
+    view.goal.hidden=stream.kind==="recorded"||!$("showGoals").checked||!Array.isArray(target);
+    if(!view.goal.hidden){view.goal.style.left=(target[0]/224*100)+"%";view.goal.style.top=(target[1]/224*100)+"%";}
+    if(stream.kind==="recorded"){
+      textField(view.fields.goal,"Source","Original dataset pixels");
+      textField(view.fields.distance,"Episode",String(currentEpisode.episode));
+      textField(view.fields.progress,"Coverage",currentEpisode.source_length+" recorded frames");
+      textField(view.fields.action,"Trajectory",ended?"Recording complete":"Recorded demonstration");
+      view.events.textContent="";
+    }else{
+      textField(view.fields.goal,"Goal",(frame.goal_index+1)+" / "+stream.goal_count+" · source frame "+frame.goal_step);
+      textField(view.fields.distance,"Distance",Number(frame.distance).toFixed(1)+" px");
+      textField(view.fields.progress,"Goals reached",frame.goals_reached+" / "+stream.goal_count);
+      textField(view.fields.action,"Last applied action",fmtAction(frame.applied_action));
+      const events=(frame.events||[]).map(e=>(eventLabels[e.event]||e.event)+" "+e.goal);
+      if(ended)events.push(stream.episode_success?"All goals reached":"Episode completed with missed goals");
+      view.events.textContent=events.join(" · ");
+    }
+  }
+}
+function seek(value){if(!currentEpisode)return;step=Math.min(currentEpisode.final_step,Math.max(0,Math.round(value)));render();}
+function selectEpisode(index){
+  setPlaying(false);currentEpisode=manifest.episodes[index];step=0;
+  $("scrub").max=currentEpisode.final_step;makePanels();render();
+}
+async function load(){
+  clearTimeout(retry);setPlaying(false);
+  try{
+    const response=await fetch(manifestUrl,{cache:"no-store"});
+    if(!response.ok)throw new Error(response.status===404?"Replay frames are being prepared. This window will check again.":"Replay request failed ("+response.status+").");
+    const value=await response.json();
+    if(value.schema_version!==1||!Array.isArray(value.episodes)||!value.episodes.length)throw new Error("Replay manifest is incomplete.");
+    for(const episode of value.episodes){
+      if(episode.streams.length!==4||episode.streams.some(s=>s.frames.length!==s.final_step+1))throw new Error("Replay stream coverage is incomplete.");
+    }
+    manifest=value;$("episode").replaceChildren();
+    for(const [i,episode] of manifest.episodes.entries()){
+      const option=element("option","Episode "+episode.episode+" · "+episode.goal_steps.length+" goals");option.value=i;$("episode").append(option);
+    }
+    $("subtitle").textContent="Checkpoint "+manifest.checkpoint_step.toLocaleString()+" · "+manifest.episodes.length+" paired held-out episodes";
+    for(const id of ["episode","play","next","previous","speed","scrub"])$(id).disabled=false;
+    $("status").hidden=true;$("panels").hidden=false;selectEpisode(0);
+  }catch(error){
+    $("status").hidden=false;$("status").textContent=error.message;
+    if(!manifest)retry=setTimeout(load,4000);
+  }
+}
+function tick(timestamp){
+  if(playing&&currentEpisode){
+    if(lastTime===null)lastTime=timestamp;
+    accumulator+=Math.min(timestamp-lastTime,250)*(Number($("speed").value)*manifest.default_frames_per_second/1000);
+    lastTime=timestamp;
+    if(accumulator>=1){const advance=Math.floor(accumulator);accumulator-=advance;seek(step+advance);if(step>=currentEpisode.final_step)setPlaying(false);}
+  }
+  requestAnimationFrame(tick);
+}
+$("episode").addEventListener("change",()=>selectEpisode(Number($("episode").value)));
+$("play").addEventListener("click",()=>{if(step===currentEpisode.final_step)seek(0);setPlaying(!playing);});
+$("previous").addEventListener("click",()=>{setPlaying(false);seek(step-1);});
+$("next").addEventListener("click",()=>{setPlaying(false);seek(step+1);});
+$("scrub").addEventListener("input",()=>{setPlaying(false);seek(Number($("scrub").value));});
+$("showGoals").addEventListener("change",render);
+$("reload").addEventListener("click",load);
+document.addEventListener("keydown",event=>{
+  if(!currentEpisode||["INPUT","SELECT","BUTTON","A"].includes(document.activeElement?.tagName))return;
+  if(event.code==="Space"){event.preventDefault();if(step===currentEpisode.final_step)seek(0);setPlaying(!playing);}
+  else if(["ArrowLeft","ArrowRight","Home","End"].includes(event.key)){
+    event.preventDefault();setPlaying(false);
+    seek(event.key==="Home"?0:event.key==="End"?currentEpisode.final_step:step+(event.key==="ArrowLeft"?-1:1));
+  }
+});
+requestAnimationFrame(tick);load();
+</script></body></html>

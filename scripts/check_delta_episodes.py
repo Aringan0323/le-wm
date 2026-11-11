@@ -26,7 +26,7 @@ class Environment:
         return self.agent_position.numpy().copy()
 
     def step(self, action):
-        self.agent_position += torch.tensor(action)
+        self.agent_position += torch.as_tensor(action,dtype=torch.float32).clamp(-1,1)
         distance = float(torch.norm(self.agent_position-self.target_position))
         return None, 0, distance < 16, False, {"distance_to_target":distance}
 
@@ -68,6 +68,13 @@ def main():
         assert [t["cumulative_steps_after"] for t in tasks] == [0,10,60,60]
         assert [t["zero_action_success"] for t in tasks] == [True,False,False,True]
         assert solver.observations == [[0,0],[10,0],[35,0]]
+        assert outcome["initial_state"] == {"position":[0,0],"cumulative_step":0}
+        assert [len(task["trajectory"]) for task in tasks] == [0,10,50,0]
+        assert tasks[0]["start_event"]["event"] == "zero_action_success"
+        assert tasks[3]["start_event"]["cumulative_step"] == 60
+        assert tasks[2]["trajectory"][0]["pre_position"] == [10,0]
+        assert tasks[2]["trajectory"][-1]["post_position"] == [60,0]
+        assert tasks[2]["trajectory"][-1]["cumulative_step_after"] == 60
         assert len(notifications) == 4 and len(notifications[-1]) == 4
         assert not outcome["success"] and outcome["final_goal_success"] and outcome["physical_steps"] == 60
 
@@ -87,13 +94,21 @@ def main():
         assert total["expected_episodes"] == 40 and total["expected_tasks"] == 152
         assert total["completed_tasks"] == 6 and total["task_successes"] == 5
 
-        for change in ("continuity","incomplete"):
+        for change in ("continuity","incomplete","action_trace","clipping","action_count","initial_state"):
             bad = deepcopy(record)
             bad.pop("record_sha256")
             if change == "continuity":
                 bad["outcome"]["tasks"][2]["actual_start_position"][0] += 1
-            else:
+            elif change == "incomplete":
                 bad["outcome"]["tasks"].pop()
+            elif change == "action_trace":
+                bad["outcome"]["tasks"][2]["trajectory"][3]["pre_position"][0] += 1
+            elif change == "clipping":
+                bad["outcome"]["tasks"][1]["trajectory"][0]["applied_action"][0] = 2
+            elif change == "action_count":
+                bad["outcome"]["tasks"][1]["trajectory"].pop()
+            else:
+                bad["outcome"]["initial_state"]["cumulative_step"] = 1
             bad["record_sha256"] = json_hash(bad)
             try:
                 planning.validate_episode(bad,episode,42,"fixture",protocol)
@@ -108,8 +123,17 @@ def main():
         strict = planning.run_episode(None,Environment(),Solver(),boundary,inputs,np.zeros((1,2)),
                                       np.ones((1,2)),None,"cpu",protocol,42)
         assert strict["tasks"][0]["steps"] == 1 and not strict["tasks"][0]["zero_action_success"]
+        clipped = planning.run_episode(None,Environment(),Solver(),boundary,inputs,np.zeros((1,2)),
+                                       np.full((1,2),3.0),None,"cpu",protocol,42)
+        action = clipped["tasks"][0]["trajectory"][0]
+        assert action["commanded_action"] == [3,0] and action["applied_action"] == [1,0]
+        assert action["post_position"] == [1,0]
+        clipped_record = {"episode":boundary,"evaluation_seed":42,"plan_sha256":"fixture","outcome":clipped}
+        clipped_record["record_sha256"] = json_hash(clipped_record)
+        planning.validate_episode(clipped_record,boundary,42,"fixture",protocol)
         print("Passed one-reset continuity, failure carryover, current rendered observations, final remainder, "
-              "zero-action/strict threshold, per-goal publication, record rejection, and task/episode denominators.")
+              "zero-action/strict threshold, replay trace, clipping, per-goal publication, record rejection, "
+              "and task/episode denominators.")
     finally:
         planning.image_embedding = original_embedding
 

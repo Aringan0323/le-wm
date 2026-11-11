@@ -31,6 +31,7 @@
 <div class="section-head"><div><h2 id="testHeading">Held-out test metrics</h2><div class="subtle" id="testCoverage"></div></div><span class="test-pass" id="testPass"></span></div>
 <div id="planningPanel" hidden><h3 id="planningHeading" style="font-size:14px;margin:4px 0">Checkpoint planning</h3><div class="test-wrap"><table class="test-table"><thead id="planningColumns"></thead><tbody id="planningRows"></tbody></table></div><p class="test-note" id="planningDefinition" hidden></p></div>
 <p class="test-note" id="planningProgress" hidden></p>
+<p id="replayLinkRow" hidden><a id="replayLink" href="/replay" target="_blank" rel="noopener">Open four-view replay</a></p>
 <div class="test-wrap"><table class="test-table"><thead><tr><th scope="col">Model</th><th scope="col">Precision</th><th scope="col">Status</th><th scope="col">Windows tested</th><th scope="col">Next-embedding MSE</th></tr></thead><tbody id="testRows"></tbody></table></div>
 <p class="test-note" id="testProgress"></p><p class="test-note" id="testComparison"></p>
 <div class="reference" id="referenceScores" hidden><strong>Earlier runs on the same test windows</strong><div class="subtle" id="referenceExperiment"></div><table><thead><tr><th>Model</th><th>BF16 MSE</th><th>FP32 MSE</th></tr></thead><tbody id="referenceRows"></tbody></table></div>
@@ -266,6 +267,7 @@ function renderPlanning(planning) {
   const models=Object.entries(planning.models||{}), continuous=planning.evaluation_mode==="continuous_episodes";
   const planned=Number(continuous?planning.expected_episodes:planning.evaluation_trials||planning.expected_trials)||0;
   $("planningPanel").hidden=!models.length;
+  $("replayLinkRow").hidden=!planning.replay_available;
   $("planningProgress").hidden=!planned;
   $("planningHeading").textContent=continuous?"Continuous episode planning":"Checkpoint planning";
   const columns=continuous?["Model","Status","Episodes completed","Episode success","Goal tasks completed","Goal-task success","Goals reached without action"]:

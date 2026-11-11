@@ -71,6 +71,18 @@ Each goal has a budget of 50 physical actions. Reaching a distance strictly belo
 
 Results and continuity records are written under `planning/episodes-checkpoint-STEP`, preserving earlier single-task tests. The dashboard displays episode and task success together. The evaluator validates one common native checkpoint generation, keeps weights and buffers frozen, and holds the training locks until testing completes. It does not automatically resume training; resume through the normal controls after verifying results. Interrupted tests reuse only complete, checksum-validated episode records, and rerun an unfinished episode from its original start.
 
+### Four-view episode replay
+
+Continuous episode tests record every executed raw action, its clipped value, and the resulting simulator position. After the test finishes, export CPU-only replay assets:
+
+```bash
+./lewm.sh python scripts/export_delta_replays.py --experiment-dir "$GROUP" --evaluation-dir "$GROUP/planning/episodes-checkpoint-STEP"
+```
+
+The exporter checks the saved evaluation and re-simulates the recorded actions, verifying the reproduced positions against the test trace. It exports the recorded dataset images as the fourth stream. Training may resume while this CPU export runs. Open **Open four-view replay** in the dashboard, launch `tools/desktop/Open-Episode-Replay.cmd` on Windows, or visit <http://127.0.0.1:8765/replay>.
+
+Choose an episode and use play/pause, the shared timeline, frame stepping, and playback speed to compare all three models with the recorded data. The timeline follows physical action steps, and shorter streams hold their final frame. Each model displays its own goal and progress, since different models can reach successive goals at different times. The replay uses recorded test actions; it does not rerun the planner or update model weights.
+
 ### Sequential queue
 
 On the configured desktop, `tools/desktop/Open-Training-Dashboard.cmd` opens the dashboard at <http://127.0.0.1:8765/>. It supports pause/resume, live test metrics, loss curve toggles and encoder spread. `Queue-DeltaSweep.ps1 -Epochs 50` stages the same three runs behind the experiment in the active pointer. Add `-Planning` to include the planning benchmark. The desktop queue and standalone command are alternative launchers for the same experiment directories.
