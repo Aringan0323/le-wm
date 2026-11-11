@@ -624,9 +624,18 @@ class Monitor:
             self.control_job={"action":action,"status":"running","requested_utc":utc()}
         def execute():
             try:
-                process=subprocess.run(["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script)],capture_output=True,text=True,timeout=60,creationflags=HIDDEN)
-                try: response=json.loads(process.stdout.strip())
-                except ValueError: response={"message":process.stdout.strip() or process.stderr.strip()}
+                # A detached training launcher can inherit pipe handles on Windows.
+                # Regular files let the short control helper finish independently.
+                with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as output, \
+                        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errors:
+                    process=subprocess.run(["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script)],
+                                           stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
+                                           timeout=60, creationflags=HIDDEN)
+                    output.seek(0)
+                    errors.seek(0)
+                    stdout, stderr = output.read().strip(), errors.read().strip()
+                try: response=json.loads(stdout)
+                except ValueError: response={"message":stdout or stderr}
                 result={"action":action,"status":"accepted" if process.returncode==0 else "failed","response":response,"finished_utc":utc()}
             except (OSError,subprocess.SubprocessError) as error: result={"action":action,"status":"failed","error":str(error),"finished_utc":utc()}
             with self.lock: self.control_job=result
@@ -866,11 +875,73 @@ def test_delta_dashboard(root):
         (queued,"waiting",None),(queued,"waiting",None)]
 
 
+def test_detached_control_output(root):
+    """A resumed launcher may outlive its helper while retaining output handles."""
+    import sys
+    from unittest.mock import patch
+
+    root.mkdir(parents=True)
+    pointer = root / "pointer.json"
+    pointer.write_text("{}")
+    for name in ("Pause-LeWM-Training.ps1", "Resume-LeWM-Training.ps1"):
+        (root / name).touch()
+    child = root / "child.py"
+    child.write_text(
+        "import sys, time\nfrom pathlib import Path\n"
+        "root = Path(sys.argv[1])\n"
+        "(root / 'child-ready').touch()\n"
+        "deadline = time.monotonic() + 20\n"
+        "while not (root / 'release-child').exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(.02)\n"
+        "(root / 'child-finished').touch()\n"
+    )
+    helper = root / "helper.py"
+    helper.write_text(
+        "import json, subprocess, sys\nfrom pathlib import Path\n"
+        "root = Path(__file__).parent\n"
+        "if sys.argv[1] == 'resume':\n"
+        "    subprocess.Popen([sys.executable, str(root / 'child.py'), str(root)],\n"
+        "        stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr,\n"
+        "        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))\n"
+        "print(json.dumps({'status': 'accepted', 'action': sys.argv[1]}), flush=True)\n"
+    )
+    monitor = Monitor(pointer, helpers=root)
+    completed = threading.Event()
+    monitor.refresh = completed.set
+    original_run = subprocess.run
+
+    def run_fixture(command, **kwargs):
+        assert command[0] == "powershell.exe"
+        action = "resume" if Path(command[-1]).name.startswith("Resume-") else "pause"
+        return original_run([sys.executable, str(helper), action], **kwargs)
+
+    try:
+        with patch.object(subprocess, "run", side_effect=run_fixture):
+            monitor.request_control("resume")
+            assert completed.wait(5), "Resume helper waited for its detached descendant"
+            assert monitor.control_job["status"] == "accepted"
+            deadline = time.monotonic() + 5
+            while not (root / "child-ready").exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert (root / "child-ready").exists() and not (root / "child-finished").exists()
+            completed.clear()
+            monitor.request_control("pause")
+            assert completed.wait(5), "Pause was blocked by the completed resume helper"
+            assert monitor.control_job["action"] == "pause" and monitor.control_job["status"] == "accepted"
+    finally:
+        (root / "release-child").touch()
+        deadline = time.monotonic() + 5
+        while not (root / "child-finished").exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        completed.wait(5)
+
+
 def self_test():
     with tempfile.TemporaryDirectory(prefix="lewm-dashboard-") as folder:
         root=Path(folder); experiment=root/"experiment"; run=experiment/"runs/sigreg"; run.mkdir(parents=True)
         test_evaluation_phases(root/"phase-fixture")
         test_delta_dashboard(root/"delta-fixture")
+        test_detached_control_output(root/"control-fixture")
         (experiment/"status.json").write_text(json.dumps({"status":"running","phase":"train_sigreg"}))
         (experiment/"manifest.json").write_text(json.dumps({"training_order":{"batch_size":32,"steps_per_epoch":11427},"counts":{"train":{"episodes":5000,"windows":365657},"test":{"episodes":3000,"windows":218790}}}))
         (run/"progress.json").write_text(json.dumps({"optimizer_steps":100,"windows_seen":3200,"expected_steps":11427,"elapsed_seconds":20,"last_losses":{"pred_loss":.012}}))
@@ -1069,7 +1140,7 @@ def self_test():
             except urllib.error.HTTPError as error: assert error.code==403
         finally: server.shutdown(); server.server_close()
     print(json.dumps({"passed":True,"checks":["shared progress and ETA, three independent loss histories, checkpoint and six precision passes","three Delta-JEPA models, bounded incremental curves and verified multi-epoch comparisons","ordered queue and all eight historical model histories through promotion","live and historical across-example latent variation","matched reference scores and full training curves",
-        "evaluation phase states and MSE attribution","HTTP status/UI and opt-in reference caching","control token rejection"]}))
+        "evaluation phase states and MSE attribution","HTTP status/UI and opt-in reference caching","control token rejection","completed resume permits pause while detached launcher keeps output handles"]}))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
