@@ -68,7 +68,7 @@ def planning_snapshot(experiment, linux_experiment=None):
             args = host_path(f"/proc/{pid}/cmdline", experiment).read_bytes().decode().split("\0")
             index = args.index("--experiment-dir")
             live = (args[index + 1] == str(linux_experiment or experiment)
-                    and any(arg.endswith("/plan_delta_checkpoints.py") for arg in args))
+                    and any(Path(arg).name in ("plan_delta_checkpoints.py", "plan_delta_episodes.py") for arg in args))
         except (OSError, UnicodeDecodeError, ValueError, IndexError):
             pass
     return {**planning, "process_live": live, "directory": str(directory)}
@@ -818,6 +818,34 @@ def test_delta_dashboard(root):
     final = {**checkpoint_progress, "status": "complete", "passed": True, "completed_trials": 60}
     (checkpoint_planning / "results.json").write_text(json.dumps(final))
     assert planning_snapshot(active)["passed"] and not planning_snapshot(active)["process_live"]
+    # Continuous episode evaluation has separate outputs and separate denominators.
+    continuous = active / "planning" / "episodes-checkpoint-18411"
+    continuous.mkdir()
+    (active / "planning/active.json").write_text(json.dumps({"directory": continuous.name}))
+    episode_progress = {"status": "running", "pid": 2147483647, "checkpoint_step": 18411,
+        "evaluation_mode": "continuous_episodes", "completed_episodes": 2, "expected_episodes": 50,
+        "completed_tasks": 7, "expected_tasks": 150,
+        "models": {key: {"status": "running", "completed_episodes": 2, "expected_episodes": 50,
+            "episode_successes": 1, "episode_success_rate_percent": 50,
+            "completed_tasks": 7, "expected_tasks": 150, "task_successes": 6,
+            "task_success_rate_percent": 600/7, "zero_action_successes": 1}}}
+    (continuous / "progress.json").write_text(json.dumps(episode_progress))
+    with patch(__name__ + ".host_path", return_value=process_args):
+        process_args.write_bytes(b"python\0/code/scripts/plan_delta_episodes.py\0--experiment-dir\0/test/group\0")
+        snapshot = planning_snapshot(active, "/test/group")
+        assert snapshot["process_live"] and snapshot["evaluation_mode"] == "continuous_episodes"
+        assert snapshot["models"][key]["episode_successes"] == 1
+        assert snapshot["models"][key]["task_successes"] == 6
+        assert snapshot["models"][key]["zero_action_successes"] == 1
+        assert not planning_snapshot(active, "/another/group")["process_live"]
+        process_args.write_bytes(b"python\0/code/scripts/not_plan_delta_episodes.py\0--experiment-dir\0/test/group\0")
+        assert not planning_snapshot(active, "/test/group")["process_live"]
+        process_args.write_bytes(b"python\0/code/scripts/plan_delta_episodes.py.bak\0--experiment-dir\0/test/group\0")
+        assert not planning_snapshot(active, "/test/group")["process_live"]
+    episode_final = {**episode_progress, "status": "complete", "passed": True}
+    (continuous / "results.json").write_text(json.dumps(episode_final))
+    assert planning_snapshot(active)["passed"] and not planning_snapshot(active)["process_live"]
+    assert read_json(checkpoint_planning / "results.json") == final
     (active / "planning/active.json").write_text(json.dumps({"directory": "../elsewhere"}))
     assert planning_snapshot(active) == {}
     (active / "planning/active.json").unlink()
@@ -1140,7 +1168,7 @@ def self_test():
             except urllib.error.HTTPError as error: assert error.code==403
         finally: server.shutdown(); server.server_close()
     print(json.dumps({"passed":True,"checks":["shared progress and ETA, three independent loss histories, checkpoint and six precision passes","three Delta-JEPA models, bounded incremental curves and verified multi-epoch comparisons","ordered queue and all eight historical model histories through promotion","live and historical across-example latent variation","matched reference scores and full training curves",
-        "evaluation phase states and MSE attribution","HTTP status/UI and opt-in reference caching","control token rejection","completed resume permits pause while detached launcher keeps output handles"]}))
+        "evaluation phase states and MSE attribution","single-task and continuous-episode planning schemas, process identity and retained history","HTTP status/UI and opt-in reference caching","control token rejection","completed resume permits pause while detached launcher keeps output handles"]}))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

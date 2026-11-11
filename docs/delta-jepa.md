@@ -57,6 +57,20 @@ The short checkpoint evaluation uses the released LeWM Two-Room planner that Del
 
 The 25-step goal offset and 50-step budget follow the [maintainer's correction](https://github.com/lucas-maes/le-wm/issues/38). The original Delta-JEPA table uses 500 test trajectories and three evaluation seeds. Our short test selects distinct held-out episodes and then a start within each, while released LeWM evaluation samples valid starting rows. All three models receive the same tasks and sampling seeds. Models load from one verified native checkpoint generation and use the training split's action normalization.
 
+### Continuous complete-episode planning
+
+To evaluate a paused shared checkpoint through complete held-out episodes:
+
+```bash
+./lewm.sh python scripts/plan_delta_episodes.py --experiment-dir "$GROUP" --episodes 20 --seed 42
+```
+
+Each episode resets once to its first recorded state. Its ordered goals are the recorded states at steps 25, 50, 75, and so on, including the final state even when the final interval is shorter than 25 steps. The simulator retains its actual agent position between goals, and the planner encodes the current rendered observation. It never teleports to the recorded intermediate states. Every model uses the same selected episodes, goal sequence, and per-goal sampling seeds.
+
+Each goal has a budget of 50 physical actions. Reaching a distance strictly below 16 pixels succeeds; a goal already within that tolerance succeeds with zero actions and is counted separately. After a failed goal, evaluation continues to the next goal from the actual final position. Task success is reached goals divided by attempted goals. Episode success requires reaching every goal in that episode; final-goal success is also recorded separately. These episode metrics extend the isolated start/goal test and should not be treated as the paper's original task-success benchmark.
+
+Results and continuity records are written under `planning/episodes-checkpoint-STEP`, preserving earlier single-task tests. The dashboard displays episode and task success together. The evaluator validates one common native checkpoint generation, keeps weights and buffers frozen, and holds the training locks until testing completes. It does not automatically resume training; resume through the normal controls after verifying results. Interrupted tests reuse only complete, checksum-validated episode records, and rerun an unfinished episode from its original start.
+
 ### Sequential queue
 
 On the configured desktop, `tools/desktop/Open-Training-Dashboard.cmd` opens the dashboard at <http://127.0.0.1:8765/>. It supports pause/resume, live test metrics, loss curve toggles and encoder spread. `Queue-DeltaSweep.ps1 -Epochs 50` stages the same three runs behind the experiment in the active pointer. Add `-Planning` to include the planning benchmark. The desktop queue and standalone command are alternative launchers for the same experiment directories.
